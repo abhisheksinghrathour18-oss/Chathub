@@ -10,4 +10,3 @@ export class GetGroupQueryDto {
   @IsUUID('4', { message: 'userId must be a valid UUID' })
   userId?: string;
 }
-

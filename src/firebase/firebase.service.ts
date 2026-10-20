@@ -102,6 +102,12 @@ export class FirebaseService implements OnModuleInit, OnModuleDestroy {
     return getFirestore(this.firebaseApp);
   }
 
+  runTransaction<T>(
+    updateFunction: (transaction: FirebaseFirestore.Transaction) => Promise<T>,
+  ): Promise<T> {
+    return this.firestore.runTransaction(updateFunction);
+  }
+
   getServerTimestamp(): FieldValue {
     return FieldValue.serverTimestamp();
   }

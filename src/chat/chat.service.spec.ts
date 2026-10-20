@@ -165,6 +165,7 @@ describe('ChatService', () => {
 
     const mockFirebaseService = {
       firestore: mockFirestore,
+      runTransaction: mockFirestore.runTransaction,
       getServerTimestamp: jest.fn().mockReturnValue('SERVER_TIMESTAMP'),
       getMessagesCollection: jest.fn().mockReturnValue({
         doc: jest.fn().mockReturnValue(mockMessageDoc),
@@ -947,6 +948,429 @@ describe('ChatService', () => {
         expect(result.chatId).toBe('group-chat-1');
         expect(result.userId).toBe('user-bbb');
         expect(result.left).toBe(true);
+      });
+    });
+  });
+
+  describe('Milestone 11: Message Edit and Delete', () => {
+    describe('editMessage', () => {
+      it('should throw BadRequestException if message text is blank', async () => {
+        await expect(
+          service.editMessage('chat-111', 'msg-999', {
+            senderId: 'user-aaa',
+            text: '   ',
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should throw NotFoundException if chat does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.editMessage('non-existent-chat', 'msg-999', {
+            senderId: 'user-aaa',
+            text: 'Updated content',
+          }),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if user is not a member of the chat', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.editMessage('chat-111', 'msg-999', {
+            senderId: 'user-outsider',
+            text: 'Updated content',
+          }),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw NotFoundException if message does not exist in Firestore', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({ exists: false }),
+            };
+            return callback(tx);
+          },
+        );
+
+        await expect(
+          service.editMessage('chat-111', 'msg-missing', {
+            senderId: 'user-aaa',
+            text: 'Updated content',
+          }),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if user is not the author of the message', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-bbb', // author is user-bbb, not user-aaa
+                  text: 'Original content',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: false,
+                }),
+              }),
+            };
+            return callback(tx);
+          },
+        );
+
+        await expect(
+          service.editMessage('chat-111', 'msg-999', {
+            senderId: 'user-aaa',
+            text: 'Updated content',
+          }),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw BadRequestException if message is already deleted', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-aaa',
+                  text: '',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: true,
+                }),
+              }),
+            };
+            return callback(tx);
+          },
+        );
+
+        await expect(
+          service.editMessage('chat-111', 'msg-999', {
+            senderId: 'user-aaa',
+            text: 'Updated content',
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should successfully edit message and update text and editedAt timestamp', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        const updateFn = jest.fn();
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-aaa',
+                  text: 'Original content',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: false,
+                }),
+              }),
+              update: updateFn,
+            };
+            return callback(tx);
+          },
+        );
+
+        (firebase.getMessageDocument as jest.Mock).mockReturnValueOnce({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              senderId: 'user-aaa',
+              text: 'Updated content',
+              createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+              editedAt: { toDate: () => new Date('2026-10-21T00:05:00Z') },
+              isDeleted: false,
+            }),
+          }),
+        });
+
+        const result = await service.editMessage('chat-111', 'msg-999', {
+          senderId: 'user-aaa',
+          text: 'Updated content',
+        });
+
+        expect(result.id).toBe('msg-999');
+        expect(result.senderId).toBe('user-aaa');
+        expect(result.text).toBe('Updated content');
+        expect(result.editedAt).toBe('2026-10-21T00:05:00.000Z');
+        expect(result.isDeleted).toBe(false);
+      });
+    });
+
+    describe('deleteMessage', () => {
+      it('should throw NotFoundException if chat does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.deleteMessage('non-existent-chat', 'msg-999', 'user-aaa'),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if user is not authorized in chat', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.deleteMessage('chat-111', 'msg-999', 'user-outsider'),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw NotFoundException if message does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({ exists: false }),
+            };
+            return callback(tx);
+          },
+        );
+
+        await expect(
+          service.deleteMessage('chat-111', 'msg-missing', 'user-aaa'),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if user is not the message author', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-bbb',
+                  text: 'Original content',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: false,
+                }),
+              }),
+            };
+            return callback(tx);
+          },
+        );
+
+        await expect(
+          service.deleteMessage('chat-111', 'msg-999', 'user-aaa'),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should soft-delete message and clear text content', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        const updateFn = jest.fn();
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-aaa',
+                  text: 'Original content',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: false,
+                }),
+              }),
+              update: updateFn,
+            };
+            return callback(tx);
+          },
+        );
+
+        (firebase.getMessageDocument as jest.Mock).mockReturnValueOnce({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              senderId: 'user-aaa',
+              text: '',
+              createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+              deletedAt: { toDate: () => new Date('2026-10-21T00:10:00Z') },
+              isDeleted: true,
+            }),
+          }),
+        });
+
+        const result = await service.deleteMessage(
+          'chat-111',
+          'msg-999',
+          'user-aaa',
+        );
+
+        expect(result.id).toBe('msg-999');
+        expect(result.senderId).toBe('user-aaa');
+        expect(result.isDeleted).toBe(true);
+        expect(result.deletedAt).toBe('2026-10-21T00:10:00.000Z');
+      });
+
+      it('should handle repeated deletion request predictably and return deleted state', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        (firebase.runTransaction as jest.Mock).mockImplementationOnce(
+          async (
+            callback: (tx: {
+              get: jest.Mock;
+              update?: jest.Mock;
+            }) => Promise<unknown>,
+          ) => {
+            const tx = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  senderId: 'user-aaa',
+                  text: '',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  deletedAt: { toDate: () => new Date('2026-10-21T00:10:00Z') },
+                  isDeleted: true,
+                }),
+              }),
+              update: jest.fn(),
+            };
+            return callback(tx);
+          },
+        );
+
+        const result = await service.deleteMessage(
+          'chat-111',
+          'msg-999',
+          'user-aaa',
+        );
+
+        expect(result.id).toBe('msg-999');
+        expect(result.isDeleted).toBe(true);
+        expect(result.deletedAt).toBe('2026-10-21T00:10:00.000Z');
+      });
+    });
+
+    describe('getMessages with soft-deleted messages', () => {
+      it('should return empty text and isDeleted: true for soft-deleted messages', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(mockChat);
+        (prisma.chatMember.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockMembership,
+        );
+
+        const queryWithDeleted = {
+          orderBy: jest.fn().mockReturnThis(),
+          limit: jest.fn().mockReturnThis(),
+          startAfter: jest.fn().mockReturnThis(),
+          get: jest.fn().mockResolvedValue({
+            docs: [
+              {
+                id: 'msg-del-1',
+                data: () => ({
+                  senderId: 'user-aaa',
+                  text: 'Secret that was deleted',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+                  isDeleted: true,
+                  deletedAt: { toDate: () => new Date('2026-10-21T00:10:00Z') },
+                }),
+              },
+              {
+                id: 'msg-legacy-2',
+                data: () => ({
+                  senderId: 'user-bbb',
+                  text: 'Legacy active message',
+                  createdAt: { toDate: () => new Date('2026-10-21T00:01:00Z') },
+                }),
+              },
+            ],
+          }),
+        };
+
+        (firebase.getMessagesCollection as jest.Mock).mockReturnValueOnce(
+          queryWithDeleted,
+        );
+
+        const result = await service.getMessages(
+          'chat-111',
+          { limit: 50 },
+          'user-aaa',
+        );
+
+        expect(result.messages).toHaveLength(2);
+        expect(result.messages[0].id).toBe('msg-del-1');
+        expect(result.messages[0].text).toBe('');
+        expect(result.messages[0].isDeleted).toBe(true);
+        expect(result.messages[0].deletedAt).toBe('2026-10-21T00:10:00.000Z');
+
+        expect(result.messages[1].id).toBe('msg-legacy-2');
+        expect(result.messages[1].text).toBe('Legacy active message');
+        expect(result.messages[1].isDeleted).toBe(false);
+        expect(result.messages[1].editedAt).toBeNull();
+        expect(result.messages[1].deletedAt).toBeNull();
       });
     });
   });

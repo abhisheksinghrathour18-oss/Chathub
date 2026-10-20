@@ -16,46 +16,155 @@ describe('Chat & User API (e2e)', () => {
   let groupChatId: string;
 
   beforeAll(async () => {
+    interface StoredMessage {
+      senderId: string;
+      text: string;
+      createdAt: { toDate: () => Date };
+      editedAt?: { toDate: () => Date };
+      deletedAt?: { toDate: () => Date };
+      isDeleted?: boolean;
+    }
+
+    const messagesStore = new Map<string, StoredMessage>();
+
+    const getDocRef = (msgId: string) => ({
+      id: msgId,
+      set: jest
+        .fn()
+        .mockImplementation(
+          async (data: { senderId: string; text: string }) => {
+            messagesStore.set(msgId, {
+              ...data,
+              createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+            });
+          },
+        ),
+      update: jest
+        .fn()
+        .mockImplementation(
+          async (data: {
+            text?: string;
+            isDeleted?: boolean;
+            editedAt?: unknown;
+            deletedAt?: unknown;
+          }) => {
+            const existing = messagesStore.get(msgId) || {
+              senderId: '',
+              text: '',
+              createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
+            };
+            const updated: StoredMessage = {
+              ...existing,
+              ...(data.text !== undefined ? { text: data.text } : {}),
+              ...(data.isDeleted !== undefined
+                ? { isDeleted: data.isDeleted }
+                : {}),
+              ...(data.editedAt !== undefined
+                ? {
+                    editedAt: {
+                      toDate: () => new Date('2026-10-21T00:05:00Z'),
+                    },
+                  }
+                : {}),
+              ...(data.deletedAt !== undefined
+                ? {
+                    deletedAt: {
+                      toDate: () => new Date('2026-10-21T00:10:00Z'),
+                    },
+                  }
+                : {}),
+            };
+            messagesStore.set(msgId, updated);
+          },
+        ),
+      get: jest.fn().mockImplementation(async () => {
+        const found = messagesStore.get(msgId);
+        return {
+          exists: !!found,
+          data: () => found,
+        };
+      }),
+    });
+
     const mockFirebaseService = {
       getMessagesCollection: jest.fn().mockImplementation(() => {
-        const docRef = {
-          id: 'msg-e2e-123',
-          set: jest.fn().mockResolvedValue({}),
-          get: jest.fn().mockResolvedValue({
-            exists: true,
-            data: () => ({
-              senderId: userCId,
-              text: 'Hello squad from user C!',
-              createdAt: { toDate: () => new Date('2026-10-21T00:00:00Z') },
-            }),
-          }),
-        };
         const queryMock = {
           orderBy: jest.fn().mockReturnThis(),
           limit: jest.fn().mockReturnThis(),
           startAfter: jest.fn().mockReturnThis(),
-          get: jest.fn().mockResolvedValue({
-            docs: [
-              {
-                id: 'msg-e2e-123',
-                data: () => ({
-                  senderId: userCId,
-                  text: 'Hello squad from user C!',
-                  createdAt: {
-                    toDate: () => new Date('2026-10-21T00:00:00Z'),
-                  },
-                }),
-              },
-            ],
+          get: jest.fn().mockImplementation(async () => {
+            const docs = Array.from(messagesStore.entries()).map(
+              ([id, data]) => ({
+                id,
+                data: () => data,
+              }),
+            );
+            return { docs };
           }),
-          doc: jest.fn().mockReturnValue(docRef),
+          doc: jest.fn().mockImplementation((id?: string) => {
+            const msgId = id || `msg-e2e-${Date.now()}`;
+            return getDocRef(msgId);
+          }),
         };
         return queryMock;
       }),
+      getMessageDocument: jest
+        .fn()
+        .mockImplementation((_chatId: string, msgId: string) =>
+          getDocRef(msgId),
+        ),
       getServerTimestamp: jest.fn().mockReturnValue({}),
       getReadReceiptsCollection: jest.fn(),
       getLastSeenCollection: jest.fn(),
-      runTransaction: jest.fn(),
+      runTransaction: jest.fn().mockImplementation(
+        async (
+          callback: (tx: {
+            get: (ref: ReturnType<typeof getDocRef>) => Promise<{
+              exists: boolean;
+              data: () => unknown;
+            }>;
+            update: (
+              ref: ReturnType<typeof getDocRef>,
+              data: Record<string, unknown>,
+            ) => Promise<void>;
+            set: (
+              ref: ReturnType<typeof getDocRef>,
+              data: Record<string, unknown>,
+            ) => Promise<void>;
+          }) => Promise<unknown>,
+        ) => {
+          const tx = {
+            get: jest
+              .fn()
+              .mockImplementation(
+                async (docRef: ReturnType<typeof getDocRef>) => {
+                  return docRef.get();
+                },
+              ),
+            update: jest
+              .fn()
+              .mockImplementation(
+                async (
+                  docRef: ReturnType<typeof getDocRef>,
+                  data: Record<string, unknown>,
+                ) => {
+                  return docRef.update(data);
+                },
+              ),
+            set: jest
+              .fn()
+              .mockImplementation(
+                async (
+                  docRef: ReturnType<typeof getDocRef>,
+                  data: Record<string, unknown>,
+                ) => {
+                  return docRef.set(data as { senderId: string; text: string });
+                },
+              ),
+          };
+          return callback(tx);
+        },
+      ),
       onModuleDestroy: jest.fn(),
     };
 
@@ -485,5 +594,158 @@ describe('Chat & User API (e2e)', () => {
       userId: userBId,
       left: true,
     });
+  });
+
+  // ==========================================
+  // Milestone 11: Message Edit & Delete E2E Tests
+  // ==========================================
+
+  let editDeleteMsgId: string;
+
+  it('POST /api/chat/:chatId/message/send - send message for edit/delete lifecycle', async () => {
+    const msgRes = await request(app.getHttpServer())
+      .post(`/api/chat/${chatId}/message/send`)
+      .send({
+        senderId: userAId,
+        text: 'Initial message for edit/delete test',
+      })
+      .expect(201);
+
+    expect(msgRes.body).toHaveProperty('id');
+    editDeleteMsgId = msgRes.body.id;
+    expect(msgRes.body.senderId).toBe(userAId);
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should reject edit with blank text with 400', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/${editDeleteMsgId}`)
+      .send({
+        senderId: userAId,
+        text: '   ',
+      })
+      .expect(400);
+
+    expect(response.body).toHaveProperty('message');
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should reject edit by non-member with 403', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/${editDeleteMsgId}`)
+      .send({
+        senderId: userDId, // userD is not in chat
+        text: 'Intruder edit',
+      })
+      .expect(403);
+
+    expect(response.body.message).toContain('not authorized');
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should reject edit by member who is not the author with 403', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/${editDeleteMsgId}`)
+      .send({
+        senderId: userBId, // userB is member, but author is userA
+        text: 'Non-author override of user text',
+      })
+      .expect(403);
+
+    expect(response.body.message).toContain('not the author');
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should reject edit for non-existent message with 404', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/msg-does-not-exist`)
+      .send({
+        senderId: userAId,
+        text: 'Updating a ghost',
+      })
+      .expect(404);
+
+    expect(response.body.message).toContain('does not exist');
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should allow original author to edit message', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/${editDeleteMsgId}`)
+      .send({
+        senderId: userAId,
+        text: 'Hello squad from user A! (edited)',
+      })
+      .expect(200);
+
+    expect(response.body).toHaveProperty('id', editDeleteMsgId);
+    expect(response.body).toHaveProperty('senderId', userAId);
+    expect(response.body.text).toBe('Hello squad from user A! (edited)');
+    expect(response.body).toHaveProperty('editedAt');
+    expect(response.body.isDeleted).toBe(false);
+  });
+
+  it('DELETE /api/chat/:chatId/message/:messageId - should reject delete by non-author with 403', async () => {
+    const response = await request(app.getHttpServer())
+      .delete(
+        `/api/chat/${chatId}/message/${editDeleteMsgId}?senderId=${userBId}`,
+      )
+      .expect(403);
+
+    expect(response.body.message).toContain('not the author');
+  });
+
+  it('DELETE /api/chat/:chatId/message/:messageId - should reject delete for non-existent message with 404', async () => {
+    const response = await request(app.getHttpServer())
+      .delete(`/api/chat/${chatId}/message/msg-fake-id?senderId=${userAId}`)
+      .expect(404);
+
+    expect(response.body.message).toContain('does not exist');
+  });
+
+  it('DELETE /api/chat/:chatId/message/:messageId - should allow original author to soft-delete message', async () => {
+    const response = await request(app.getHttpServer())
+      .delete(
+        `/api/chat/${chatId}/message/${editDeleteMsgId}?senderId=${userAId}`,
+      )
+      .expect(200);
+
+    expect(response.body).toHaveProperty('id', editDeleteMsgId);
+    expect(response.body).toHaveProperty('senderId', userAId);
+    expect(response.body.isDeleted).toBe(true);
+    expect(response.body).toHaveProperty('deletedAt');
+  });
+
+  it('DELETE /api/chat/:chatId/message/:messageId - repeated deletion request should be idempotent with 200', async () => {
+    const response = await request(app.getHttpServer())
+      .delete(
+        `/api/chat/${chatId}/message/${editDeleteMsgId}?senderId=${userAId}`,
+      )
+      .expect(200);
+
+    expect(response.body.id).toBe(editDeleteMsgId);
+    expect(response.body.isDeleted).toBe(true);
+  });
+
+  it('PATCH /api/chat/:chatId/message/:messageId - should reject editing an already deleted message with 400', async () => {
+    const response = await request(app.getHttpServer())
+      .patch(`/api/chat/${chatId}/message/${editDeleteMsgId}`)
+      .send({
+        senderId: userAId,
+        text: 'Attempting to revive deleted message',
+      })
+      .expect(400);
+
+    expect(response.body.message).toContain('Cannot edit a deleted message');
+  });
+
+  it('GET /api/chat/:chatId/messages - soft-deleted message text is not exposed in message list', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/api/chat/${chatId}/messages?userId=${userAId}`)
+      .expect(200);
+
+    expect(response.body).toHaveProperty('messages');
+    const deletedMsg = response.body.messages.find(
+      (m: { id: string }) => m.id === editDeleteMsgId,
+    );
+    expect(deletedMsg).toBeDefined();
+    expect(deletedMsg.text).toBe(''); // Text must be hidden / empty
+    expect(deletedMsg.isDeleted).toBe(true);
+    expect(deletedMsg).toHaveProperty('deletedAt');
   });
 });

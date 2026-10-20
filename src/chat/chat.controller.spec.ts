@@ -19,6 +19,8 @@ describe('ChatController', () => {
       addGroupMember: jest.fn(),
       removeGroupMember: jest.fn(),
       leaveGroup: jest.fn(),
+      editMessage: jest.fn(),
+      deleteMessage: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -242,6 +244,49 @@ describe('ChatController', () => {
 
       expect(result).toEqual(mockResult);
       expect(service.leaveGroup).toHaveBeenCalledWith('group-1', dto);
+    });
+  });
+
+  describe('Milestone 11: Message Edit and Delete Endpoints', () => {
+    it('should delegate editMessage to service and return result', async () => {
+      const mockResult = {
+        id: 'msg-1',
+        chatId: 'chat-1',
+        senderId: 'user-1',
+        text: 'Edited text',
+        createdAt: '2026-10-21T00:00:00.000Z',
+        editedAt: '2026-10-21T00:05:00.000Z',
+        isDeleted: false,
+      };
+      service.editMessage.mockResolvedValue(mockResult);
+
+      const dto = { senderId: 'user-1', text: 'Edited text' };
+      const result = await controller.editMessage('chat-1', 'msg-1', dto);
+
+      expect(result).toEqual(mockResult);
+      expect(service.editMessage).toHaveBeenCalledWith('chat-1', 'msg-1', dto);
+    });
+
+    it('should delegate deleteMessage to service and return result', async () => {
+      const mockResult = {
+        id: 'msg-1',
+        chatId: 'chat-1',
+        senderId: 'user-1',
+        isDeleted: true,
+        deletedAt: '2026-10-21T00:10:00.000Z',
+      };
+      service.deleteMessage.mockResolvedValue(mockResult);
+
+      const result = await controller.deleteMessage('chat-1', 'msg-1', {
+        senderId: 'user-1',
+      });
+
+      expect(result).toEqual(mockResult);
+      expect(service.deleteMessage).toHaveBeenCalledWith(
+        'chat-1',
+        'msg-1',
+        'user-1',
+      );
     });
   });
 });

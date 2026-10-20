@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -24,6 +25,8 @@ import {
   ChatService,
   CreateChatResult,
   CreateGroupChatResult,
+  DeleteMessageResult,
+  EditMessageResult,
   GetMessagesResult,
   GroupDetailsResult,
   LastSeenResult,
@@ -35,6 +38,13 @@ import {
 import { AddGroupMemberDto } from './dto/add-group-member.dto';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { CreateGroupChatDto } from './dto/create-group-chat.dto';
+import {
+  DeleteMessageDto,
+  DeleteMessageQueryDto,
+} from './dto/delete-message.dto';
+import { EditMessageDto } from './dto/edit-message.dto';
+import { DeleteMessageDto, DeleteMessageQueryDto } from './dto/delete-message.dto';
+import { EditMessageDto } from './dto/edit-message.dto';
 import { GetGroupQueryDto } from './dto/get-group-query.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { LeaveGroupDto } from './dto/leave-group.dto';
@@ -555,5 +565,129 @@ export class ChatController {
     @Body() dto: LeaveGroupDto,
   ): Promise<LeaveGroupResult> {
     return this.chatService.leaveGroup(chatId, dto);
+  }
+
+  /**
+   * Milestone 11: Edit Message
+   * PATCH /api/chat/:chatId/message/:messageId
+   */
+  @Patch(':chatId/message/:messageId')
+  @ApiOperation({
+    summary: 'Edit a message text',
+    description:
+      'Allows the original sender to edit a message. Validates chat membership, verifies original sender ownership, rejects editing soft-deleted messages, and records an editedAt server timestamp.',
+  })
+  @ApiParam({
+    name: 'chatId',
+    description: 'Unique ID of the chat in PostgreSQL',
+    example: '6b6eb37e-5b65-44eb-9ec9-585b6e80f01c',
+  })
+  @ApiParam({
+    name: 'messageId',
+    description: 'Unique ID of the message document in Firestore',
+    example: 'msg-123456',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Message successfully edited.',
+    schema: {
+      example: {
+        id: 'msg-123456',
+        chatId: '6b6eb37e-5b65-44eb-9ec9-585b6e80f01c',
+        senderId: '78a15aac-0d92-4ca9-ab67-70a78b569581',
+        text: 'Updated message content',
+        createdAt: '2026-10-21T00:00:00.000Z',
+        editedAt: '2026-10-21T00:05:00.000Z',
+        isDeleted: false,
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid input, blank text, or message is already deleted.',
+  })
+  @ApiResponse({
+    status: 403,
+    description:
+      'User is not a member of the conversation or not the original message author.',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Chat or message does not exist.',
+  })
+  async editMessage(
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: EditMessageDto,
+  ): Promise<EditMessageResult> {
+    return this.chatService.editMessage(chatId, messageId, dto);
+  }
+
+  /**
+   * Milestone 11: Delete Message
+   * DELETE /api/chat/:chatId/message/:messageId
+   */
+  @Delete(':chatId/message/:messageId')
+  @ApiOperation({
+    summary: 'Soft-delete a message',
+    description:
+      'Allows the original author to soft-delete a message. Clears content from storage, retains messageId and createdAt for timeline continuity, and records deletedAt timestamp. Supports senderId via query param, request body, or x-user-id header.',
+  })
+  @ApiParam({
+    name: 'chatId',
+    description: 'Unique ID of the chat in PostgreSQL',
+    example: '6b6eb37e-5b65-44eb-9ec9-585b6e80f01c',
+  })
+  @ApiParam({
+    name: 'messageId',
+    description: 'Unique ID of the message document in Firestore',
+    example: 'msg-123456',
+  })
+  @ApiQuery({
+    name: 'senderId',
+    required: false,
+    description: 'UUID of the original message author',
+    example: '78a15aac-0d92-4ca9-ab67-70a78b569581',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Message successfully soft-deleted.',
+    schema: {
+      example: {
+        id: 'msg-123456',
+        chatId: '6b6eb37e-5b65-44eb-9ec9-585b6e80f01c',
+        senderId: '78a15aac-0d92-4ca9-ab67-70a78b569581',
+        isDeleted: true,
+        deletedAt: '2026-10-21T00:10:00.000Z',
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Missing senderId.',
+  })
+  @ApiResponse({
+    status: 403,
+    description:
+      'User is not a member of the conversation or not the original message author.',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Chat or message does not exist.',
+  })
+  async deleteMessage(
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Query() query: DeleteMessageQueryDto,
+    @Body() body?: DeleteMessageDto,
+    @Headers('x-user-id') headerUserId?: string,
+  ): Promise<DeleteMessageResult> {
+    const actingSenderId = body?.senderId || query.senderId || headerUserId;
+    if (!actingSenderId) {
+      throw new BadRequestException(
+        'senderId must be provided via query param, body, or x-user-id header',
+      );
+    }
+    return this.chatService.deleteMessage(chatId, messageId, actingSenderId);
   }
 }
