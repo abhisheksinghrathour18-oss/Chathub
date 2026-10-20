@@ -9,4 +9,3 @@ export class CreateChatDto {
   @IsNotEmpty({ message: 'userBId must not be empty' })
   userBId!: string;
 }
-
