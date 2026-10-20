@@ -4,11 +4,12 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/database/prisma.service';
 
-describe('Chat API (e2e)', () => {
+describe('Chat & User API (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let userAId: string;
   let userBId: string;
+  let userCId: string; // User with no chats
   let chatId: string;
 
   beforeAll(async () => {
@@ -30,25 +31,35 @@ describe('Chat API (e2e)', () => {
     prisma = app.get(PrismaService);
 
     const userA = await prisma.user.upsert({
-      where: { email: 'alice-e2e-m7@example.com' },
+      where: { email: 'alice-e2e-m8@example.com' },
       update: {},
       create: {
-        email: 'alice-e2e-m7@example.com',
-        name: 'Alice E2E M7',
+        email: 'alice-e2e-m8@example.com',
+        name: 'Alice E2E M8',
       },
     });
 
     const userB = await prisma.user.upsert({
-      where: { email: 'bob-e2e-m7@example.com' },
+      where: { email: 'bob-e2e-m8@example.com' },
       update: {},
       create: {
-        email: 'bob-e2e-m7@example.com',
-        name: 'Bob E2E M7',
+        email: 'bob-e2e-m8@example.com',
+        name: 'Bob E2E M8',
+      },
+    });
+
+    const userC = await prisma.user.upsert({
+      where: { email: 'charlie-e2e-m8@example.com' },
+      update: {},
+      create: {
+        email: 'charlie-e2e-m8@example.com',
+        name: 'Charlie E2E M8',
       },
     });
 
     userAId = userA.id;
     userBId = userB.id;
+    userCId = userC.id;
   });
 
   afterAll(async () => {
@@ -156,5 +167,37 @@ describe('Chat API (e2e)', () => {
       .post(`/api/chat/${fakeChatId}/lastseen`)
       .send({ userId: userAId, messageId: 'msg-123' })
       .expect(404);
+  });
+
+  it('GET /api/user/:userId/chats - should reject non-existent user with 404', async () => {
+    const fakeUserId = '00000000-0000-0000-0000-000000000000';
+    await request(app.getHttpServer())
+      .get(`/api/user/${fakeUserId}/chats`)
+      .expect(404);
+  });
+
+  it('GET /api/user/:userId/chats - should return empty list for user with no chats', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/api/user/${userCId}/chats`)
+      .expect(200);
+
+    expect(response.body).toEqual({
+      userId: userCId,
+      chats: [],
+      totalCount: 0,
+    });
+  });
+
+  it('GET /api/user/:userId/chats - should return user chats and member IDs', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/api/user/${userAId}/chats`)
+      .expect(200);
+
+    expect(response.body).toHaveProperty('userId', userAId);
+    expect(response.body).toHaveProperty('totalCount');
+    expect(response.body.totalCount).toBeGreaterThanOrEqual(1);
+    expect(response.body.chats[0]).toHaveProperty('chatId', chatId);
+    expect(response.body.chats[0].memberIds).toContain(userAId);
+    expect(response.body.chats[0].memberIds).toContain(userBId);
   });
 });
