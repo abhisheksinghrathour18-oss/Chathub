@@ -14,9 +14,11 @@ import {
   CreateChatResult,
   GetMessagesResult,
   PersistedMessage,
+  ReadReceiptResult,
 } from './chat.service';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
+import { MarkReadDto } from './dto/mark-read.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
 @Controller('chat')
@@ -57,5 +59,19 @@ export class ChatController {
     @Headers('x-user-id') headerUserId?: string,
   ): Promise<GetMessagesResult> {
     return this.chatService.getMessages(chatId, query, headerUserId);
+  }
+
+  /**
+   * API 4: Mark Message Read
+   * POST /api/chat/:chatId/message/:messageId/read
+   */
+  @Post(':chatId/message/:messageId/read')
+  @HttpCode(HttpStatus.OK)
+  async markMessageRead(
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: MarkReadDto,
+  ): Promise<ReadReceiptResult> {
+    return this.chatService.markMessageRead(chatId, messageId, dto);
   }
 }
