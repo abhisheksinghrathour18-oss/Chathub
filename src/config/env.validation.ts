@@ -31,6 +31,10 @@ export class EnvironmentVariables {
   @IsNotEmpty()
   @IsOptional()
   GLOBAL_PREFIX: string = 'api';
+
+  @IsString()
+  @IsNotEmpty()
+  DATABASE_URL!: string;
 }
 
 export function validate(
@@ -53,4 +57,3 @@ export function validate(
 
   return validatedConfig;
 }
-
