@@ -35,6 +35,26 @@ export class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   DATABASE_URL!: string;
+
+  @IsString()
+  @IsOptional()
+  FIREBASE_PROJECT_ID: string = 'chathub-assessment';
+
+  @IsString()
+  @IsOptional()
+  FIREBASE_CLIENT_EMAIL?: string;
+
+  @IsString()
+  @IsOptional()
+  FIREBASE_PRIVATE_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  FIREBASE_SERVICE_ACCOUNT_PATH?: string;
+
+  @IsString()
+  @IsOptional()
+  FIRESTORE_EMULATOR_HOST?: string;
 }
 
 export function validate(
