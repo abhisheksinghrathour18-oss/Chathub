@@ -16,9 +16,11 @@
   - [3. Backwards-Movement Prevention in Last-Seen Tracking](#3-backwards-movement-prevention-in-last-seen-tracking)
   - [4. Idempotent Read Receipts](#4-idempotent-read-receipts)
   - [5. Group Chat Relational Integrity & Role Governance](#5-group-chat-relational-integrity--role-governance-milestone-10)
+  - [6. Message Immutability, Soft Deletion & Concurrency Control](#6-message-immutability-soft-deletion--concurrency-control-milestone-11)
 - [API Documentation](#api-documentation)
   - [1:1 Direct Chat APIs](#11-direct-chat-apis)
   - [Group Chat Management APIs (Milestone 10)](#group-chat-management-apis-milestone-10)
+  - [Message Edit & Delete APIs (Milestone 11)](#message-edit--delete-apis-milestone-11)
 - [Interactive Swagger / OpenAPI](#interactive-swagger--openapi)
 - [Prerequisites & Environment Setup](#prerequisites--environment-setup)
 - [Getting Started](#getting-started)
@@ -97,8 +99,11 @@ chats/{chatId}/
   │
   ├── messages/{messageId}
   │     ├── senderId: string
-  │     ├── text: string
+  │     ├── text: string (cleared to "" if isDeleted is true)
   │     ├── createdAt: ServerTimestamp
+  │     ├── editedAt: ServerTimestamp | null (optional)
+  │     ├── isDeleted: boolean (defaults to false if omitted)
+  │     ├── deletedAt: ServerTimestamp | null (optional)
   │     │
   │     └── readReceipts/{userId}
   │           ├── userId: string
@@ -109,12 +114,13 @@ chats/{chatId}/
         └── updatedAt: ServerTimestamp
 ```
 
-### Firestore Design Trade-offs
+### Firestore Design Trade-offs & Backward Compatibility
 1. **Subcollection Scoping**: Messages are naturally scoped under `chats/{chatId}/messages`. Cross-chat data leaks are impossible at the path level.
 2. **Stable Document IDs**: Using `userId` as the document ID for both `readReceipts/{userId}` and `lastSeen/{userId}` guarantees:
    - $O(1)$ direct document access without costly query scans.
    - Built-in idempotency (duplicate network retries cannot produce duplicate documents).
 3. **Atomic Timestamps**: All write timestamps use `FieldValue.serverTimestamp()`, eliminating client clock skew and timezone discrepancies.
+4. **Backward-Compatible Schema Evolution**: Older messages created prior to Milestone 11 lack `editedAt`, `isDeleted`, and `deletedAt`. In the application layer, these fields default cleanly to `editedAt: null`, `isDeleted: false`, and `deletedAt: null`, ensuring zero migration downtime and 100% backward compatibility.
 
 ---
 
@@ -143,6 +149,12 @@ chats/{chatId}/
 - **Role-Based Governance**: Only members with `role: ADMIN` can add or remove other participants (`403 Forbidden` for regular members).
 - **Last Administrator Guard**: Prevents removing or abandoning a group by the last administrator while other members remain (`400 Bad Request`), preventing orphaned groups.
 - **PostgreSQL as Source of Truth**: All group metadata and memberships reside in PostgreSQL, ensuring ACID consistency, indexed membership queries, and complete compatibility with existing Firestore message streams.
+
+### 6. Message Immutability, Soft Deletion & Concurrency Control (Milestone 11)
+- **Author-Only Permissions**: Only the original message sender (`senderId === authorId`) can edit or delete their message.
+- **Relational Membership Enforcement**: The actor must be an authorized member in the PostgreSQL conversation before any Firestore read/write can occur (`403 Forbidden`).
+- **Atomic Concurrency via Firestore Transactions**: Edit and delete operations run inside a Firestore transaction (`runTransaction`), preventing race conditions, lost updates, or reviving already deleted messages.
+- **Soft-Delete Strategy & Privacy**: When a message is deleted, its sensitive text content is cleared from storage (`text: ""`) while message ID and timestamps remain intact. This preserves chronological timeline order, cursor-based pagination continuity, and read receipt linkages without leaking deleted content to client devices.
 
 ---
 
@@ -407,6 +419,67 @@ chats/{chatId}/
     "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
     "userId": "05044ae6-ed94-405c-9416-36340b4842a6",
     "left": true
+  }
+  ```
+
+---
+
+### Message Edit & Delete APIs (Milestone 11)
+
+#### 12. Edit Message
+- **Route**: `PATCH /api/chat/:chatId/message/:messageId`
+- **Request Body**:
+  ```json
+  {
+    "senderId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "text": "Hello squad, this is my updated message!"
+  }
+  ```
+- **Rules**:
+  - `senderId` must be the original author of the message (`403 Forbidden` if another user attempts edit).
+  - Acting sender must be a member of the conversation in PostgreSQL (`403 Forbidden`).
+  - Text must not be empty or blank (`400 Bad Request`).
+  - Cannot edit a soft-deleted message (`400 Bad Request`).
+  - Executed inside a Firestore `runTransaction` for concurrency safety.
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "id": "msg-123456",
+    "chatId": "6b6eb37e-5b65-44eb-9ec9-585b6e80f01c",
+    "senderId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "text": "Hello squad, this is my updated message!",
+    "createdAt": "2026-10-21T00:00:00.000Z",
+    "editedAt": "2026-10-21T00:05:00.000Z",
+    "isDeleted": false
+  }
+  ```
+
+#### 13. Delete Message (Soft Delete)
+- **Route**: `DELETE /api/chat/:chatId/message/:messageId?senderId=<authorUserId>`
+- **Header Alternative**: `x-user-id: <authorUserId>`
+- **Request Body (Alternative)**:
+  ```json
+  {
+    "senderId": "78a15aac-0d92-4ca9-ab67-70a78b569581"
+  }
+  ```
+- **Rules**:
+  - Only the original message author can delete the message (`403 Forbidden` if another user attempts deletion).
+  - Acting user must be an active member of the conversation in PostgreSQL (`403 Forbidden`).
+  - Employs a **soft-delete/tombstone strategy**:
+    - Clears sensitive content from storage (`text: ""`).
+    - Retains `id`, `senderId`, and `createdAt` so timeline chronological ordering and cursor pagination remain unbroken.
+    - Sets `isDeleted: true` and records `deletedAt` server timestamp.
+  - Repeated deletion requests are idempotent (`200 OK`).
+  - Normal message retrieval (`GET /messages`) hides the deleted text and flags `isDeleted: true`.
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "id": "msg-123456",
+    "chatId": "6b6eb37e-5b65-44eb-9ec9-585b6e80f01c",
+    "senderId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "isDeleted": true,
+    "deletedAt": "2026-10-21T00:10:00.000Z"
   }
   ```
 

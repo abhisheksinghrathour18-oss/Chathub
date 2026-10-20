@@ -11,4 +11,3 @@ export class RemoveMemberQueryDto {
   @IsUUID('4', { message: 'actingUserId must be a valid UUID' })
   actingUserId?: string;
 }
-

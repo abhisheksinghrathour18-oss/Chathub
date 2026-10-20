@@ -13,6 +13,7 @@ import { FirebaseService } from '../firebase/firebase.service';
 import { AddGroupMemberDto } from './dto/add-group-member.dto';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { CreateGroupChatDto } from './dto/create-group-chat.dto';
+import { EditMessageDto } from './dto/edit-message.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { LeaveGroupDto } from './dto/leave-group.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
@@ -28,6 +29,27 @@ export interface PersistedMessage {
   senderId: string;
   text: string;
   createdAt: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
+  isDeleted?: boolean;
+}
+
+export interface EditMessageResult {
+  id: string;
+  chatId: string;
+  senderId: string;
+  text: string;
+  createdAt: string;
+  editedAt: string;
+  isDeleted: boolean;
+}
+
+export interface DeleteMessageResult {
+  id: string;
+  chatId: string;
+  senderId: string;
+  isDeleted: boolean;
+  deletedAt: string;
 }
 
 export interface GetMessagesResult {
@@ -327,11 +349,30 @@ export class ChatService {
           ? data['createdAt'].toDate()
           : new Date();
 
+      const isDeleted = data?.['isDeleted'] === true;
+
+      const editedAtDate =
+        data &&
+        data['editedAt'] &&
+        typeof data['editedAt'].toDate === 'function'
+          ? data['editedAt'].toDate()
+          : null;
+
+      const deletedAtDate =
+        data &&
+        data['deletedAt'] &&
+        typeof data['deletedAt'].toDate === 'function'
+          ? data['deletedAt'].toDate()
+          : null;
+
       return {
         id: doc.id,
         senderId: (data['senderId'] as string) || '',
-        text: (data['text'] as string) || '',
+        text: isDeleted ? '' : (data['text'] as string) || '',
         createdAt: createdAtDate.toISOString(),
+        editedAt: editedAtDate ? editedAtDate.toISOString() : null,
+        deletedAt: deletedAtDate ? deletedAtDate.toISOString() : null,
+        isDeleted,
       };
     });
 
@@ -907,6 +948,220 @@ export class ChatService {
       chatId,
       userId: dto.userId,
       left: true,
+    };
+  }
+
+  /**
+   * Milestone 11: Edit Message
+   * PATCH /api/chat/:chatId/message/:messageId
+   */
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    dto: EditMessageDto,
+  ): Promise<EditMessageResult> {
+    const { senderId, text } = dto;
+    const trimmedText = text?.trim();
+    if (!trimmedText) {
+      throw new BadRequestException('Message text cannot be blank');
+    }
+
+    // 1. Verify chat exists in PostgreSQL
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+    });
+    if (!chat) {
+      throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
+    }
+
+    // 2. Verify acting user is a member of the chat
+    const membership = await this.prisma.chatMember.findUnique({
+      where: {
+        chatId_userId: { chatId, userId: senderId },
+      },
+    });
+    if (!membership) {
+      throw new ForbiddenException(
+        `User '${senderId}' is not authorized in chat '${chatId}'`,
+      );
+    }
+
+    // 3. Firestore transaction for atomic check & update
+    const messageDocRef = this.firebase.getMessageDocument(chatId, messageId);
+
+    const result = await this.firebase.runTransaction(async (transaction) => {
+      const docSnap = await transaction.get(messageDocRef);
+      if (!docSnap.exists) {
+        throw new NotFoundException(
+          `Message with ID '${messageId}' does not exist in chat '${chatId}'`,
+        );
+      }
+
+      const data = docSnap.data();
+      if (!data) {
+        throw new NotFoundException(
+          `Message with ID '${messageId}' data is empty`,
+        );
+      }
+
+      // Check ownership: Only the original sender may edit their message
+      if (data['senderId'] !== senderId) {
+        throw new ForbiddenException(
+          `User '${senderId}' is not the author of message '${messageId}'`,
+        );
+      }
+
+      // Reject editing if message is deleted
+      if (data['isDeleted'] === true) {
+        throw new BadRequestException('Cannot edit a deleted message');
+      }
+
+      const createdAtDate =
+        data['createdAt'] && typeof data['createdAt'].toDate === 'function'
+          ? data['createdAt'].toDate()
+          : new Date();
+
+      transaction.update(messageDocRef, {
+        text: trimmedText,
+        editedAt: this.firebase.getServerTimestamp(),
+      });
+
+      return {
+        createdAtDate,
+      };
+    });
+
+    this.logger.log(
+      `Message '${messageId}' edited in chat '${chatId}' by sender '${senderId}'`,
+    );
+
+    const updatedSnap = await messageDocRef.get();
+    const updatedData = updatedSnap.data();
+    const editedAtDate =
+      updatedData &&
+      updatedData['editedAt'] &&
+      typeof updatedData['editedAt'].toDate === 'function'
+        ? updatedData['editedAt'].toDate()
+        : new Date();
+
+    return {
+      id: messageId,
+      chatId,
+      senderId,
+      text: trimmedText,
+      createdAt: result.createdAtDate.toISOString(),
+      editedAt: editedAtDate.toISOString(),
+      isDeleted: false,
+    };
+  }
+
+  /**
+   * Milestone 11: Delete Message
+   * DELETE /api/chat/:chatId/message/:messageId
+   */
+  async deleteMessage(
+    chatId: string,
+    messageId: string,
+    actingSenderId: string,
+  ): Promise<DeleteMessageResult> {
+    // 1. Verify chat exists in PostgreSQL
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+    });
+    if (!chat) {
+      throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
+    }
+
+    // 2. Verify acting user is a member of the chat
+    const membership = await this.prisma.chatMember.findUnique({
+      where: {
+        chatId_userId: { chatId, userId: actingSenderId },
+      },
+    });
+    if (!membership) {
+      throw new ForbiddenException(
+        `User '${actingSenderId}' is not authorized in chat '${chatId}'`,
+      );
+    }
+
+    // 3. Firestore transaction for atomic check & soft delete
+    const messageDocRef = this.firebase.getMessageDocument(chatId, messageId);
+
+    const deleteState = await this.firebase.runTransaction(
+      async (transaction) => {
+        const docSnap = await transaction.get(messageDocRef);
+        if (!docSnap.exists) {
+          throw new NotFoundException(
+            `Message with ID '${messageId}' does not exist in chat '${chatId}'`,
+          );
+        }
+
+        const data = docSnap.data();
+        if (!data) {
+          throw new NotFoundException(
+            `Message with ID '${messageId}' data is empty`,
+          );
+        }
+
+        // Check ownership: Only the original sender may delete their message
+        if (data['senderId'] !== actingSenderId) {
+          throw new ForbiddenException(
+            `User '${actingSenderId}' is not the author of message '${messageId}'`,
+          );
+        }
+
+        // Handle repeated deletion requests consistently
+        if (data['isDeleted'] === true) {
+          const deletedAtDate =
+            data['deletedAt'] && typeof data['deletedAt'].toDate === 'function'
+              ? data['deletedAt'].toDate()
+              : new Date();
+          return {
+            alreadyDeleted: true,
+            deletedAtDate,
+          };
+        }
+
+        // Soft-delete strategy:
+        // Clear text content so it is never exposed in message retrieval
+        // Retain message ID, senderId, and createdAt for timeline continuity
+        transaction.update(messageDocRef, {
+          isDeleted: true,
+          text: '',
+          deletedAt: this.firebase.getServerTimestamp(),
+        });
+
+        return {
+          alreadyDeleted: false,
+          deletedAtDate: null,
+        };
+      },
+    );
+
+    this.logger.log(
+      `Message '${messageId}' soft-deleted in chat '${chatId}' by sender '${actingSenderId}'`,
+    );
+
+    let finalDeletedAtDate: Date;
+    if (deleteState.alreadyDeleted && deleteState.deletedAtDate) {
+      finalDeletedAtDate = deleteState.deletedAtDate;
+    } else {
+      const updatedSnap = await messageDocRef.get();
+      const updatedData = updatedSnap.data();
+      finalDeletedAtDate =
+        updatedData &&
+        updatedData['deletedAt'] &&
+        typeof updatedData['deletedAt'].toDate === 'function'
+          ? updatedData['deletedAt'].toDate()
+          : new Date();
+    }
+
+    return {
+      id: messageId,
+      chatId,
+      senderId: actingSenderId,
+      isDeleted: true,
+      deletedAt: finalDeletedAtDate.toISOString(),
     };
   }
 }
