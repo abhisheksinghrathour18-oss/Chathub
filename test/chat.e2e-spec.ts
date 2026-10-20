@@ -9,6 +9,7 @@ describe('Chat API (e2e)', () => {
   let prisma: PrismaService;
   let userAId: string;
   let userBId: string;
+  let chatId: string;
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -28,22 +29,21 @@ describe('Chat API (e2e)', () => {
 
     prisma = app.get(PrismaService);
 
-    // Retrieve or create test users
     const userA = await prisma.user.upsert({
-      where: { email: 'alice-e2e@example.com' },
+      where: { email: 'alice-e2e-m5@example.com' },
       update: {},
       create: {
-        email: 'alice-e2e@example.com',
-        name: 'Alice E2E',
+        email: 'alice-e2e-m5@example.com',
+        name: 'Alice E2E M5',
       },
     });
 
     const userB = await prisma.user.upsert({
-      where: { email: 'bob-e2e@example.com' },
+      where: { email: 'bob-e2e-m5@example.com' },
       update: {},
       create: {
-        email: 'bob-e2e@example.com',
-        name: 'Bob E2E',
+        email: 'bob-e2e-m5@example.com',
+        name: 'Bob E2E M5',
       },
     });
 
@@ -85,10 +85,9 @@ describe('Chat API (e2e)', () => {
       .expect(200);
 
     expect(res1.body).toHaveProperty('chatId');
-    const chatId = res1.body.chatId;
+    chatId = res1.body.chatId;
     expect(typeof chatId).toBe('string');
 
-    // Calling with reversed user order must return identical chatId (Idempotency)
     const res2 = await request(app.getHttpServer())
       .post('/api/chat/create')
       .send({ userAId: userBId, userBId: userAId })
@@ -96,5 +95,34 @@ describe('Chat API (e2e)', () => {
 
     expect(res2.body.chatId).toBe(chatId);
   });
-});
 
+  it('POST /api/chat/:chatId/message/send - should reject non-member sender with 403', async () => {
+    const strangerId = '00000000-0000-0000-0000-000000000099';
+    await request(app.getHttpServer())
+      .post(`/api/chat/${chatId}/message/send`)
+      .send({ senderId: strangerId, text: 'Hello' })
+      .expect(403);
+  });
+
+  it('POST /api/chat/:chatId/message/send - should reject non-existent chat with 404', async () => {
+    const fakeChatId = '00000000-0000-0000-0000-000000000000';
+    await request(app.getHttpServer())
+      .post(`/api/chat/${fakeChatId}/message/send`)
+      .send({ senderId: userAId, text: 'Hello' })
+      .expect(404);
+  });
+
+  it('GET /api/chat/:chatId/messages - should reject unauthorized non-member with 403', async () => {
+    const strangerId = '00000000-0000-0000-0000-000000000099';
+    await request(app.getHttpServer())
+      .get(`/api/chat/${chatId}/messages?userId=${strangerId}`)
+      .expect(403);
+  });
+
+  it('GET /api/chat/:chatId/messages - should reject non-existent chat with 404', async () => {
+    const fakeChatId = '00000000-0000-0000-0000-000000000000';
+    await request(app.getHttpServer())
+      .get(`/api/chat/${fakeChatId}/messages?userId=${userAId}`)
+      .expect(404);
+  });
+});
