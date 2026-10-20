@@ -1,0 +1,40 @@
+# Compiled output
+/dist
+/build
+
+# Dependencies
+/node_modules
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+*firebase*.json
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+*.log
+
+# Testing coverage & cache
+/coverage
+.nyc_output
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary folders
+/tmp
+/.system_generated
+
