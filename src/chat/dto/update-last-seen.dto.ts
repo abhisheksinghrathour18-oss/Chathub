@@ -9,4 +9,3 @@ export class UpdateLastSeenDto {
   @IsNotEmpty({ message: 'messageId must not be empty' })
   messageId!: string;
 }
-
