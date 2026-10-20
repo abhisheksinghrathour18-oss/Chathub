@@ -21,4 +21,3 @@ describe('PrismaService', () => {
     expect(typeof service.onModuleDestroy).toBe('function');
   });
 });
-

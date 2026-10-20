@@ -23,4 +23,3 @@ export class PrismaService
     this.logger.log('Disconnected from PostgreSQL');
   }
 }
-
