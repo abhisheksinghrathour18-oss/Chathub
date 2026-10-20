@@ -11,6 +11,7 @@ describe('ChatController', () => {
       createOrGetChat: jest.fn(),
       sendMessage: jest.fn(),
       getMessages: jest.fn(),
+      markMessageRead: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -87,5 +88,25 @@ describe('ChatController', () => {
       { limit: 50 },
       'user-1',
     );
+  });
+
+  it('should delegate markMessageRead to service and return result', async () => {
+    const mockReceipt = {
+      chatId: 'chat-1',
+      messageId: 'msg-123',
+      userId: 'user-2',
+      readAt: '2026-10-20T13:00:00.000Z',
+      isNew: true,
+    };
+    service.markMessageRead.mockResolvedValue(mockReceipt);
+
+    const result = await controller.markMessageRead('chat-1', 'msg-123', {
+      userId: 'user-2',
+    });
+
+    expect(result).toEqual(mockReceipt);
+    expect(service.markMessageRead).toHaveBeenCalledWith('chat-1', 'msg-123', {
+      userId: 'user-2',
+    });
   });
 });

@@ -11,6 +11,7 @@ import { PrismaService } from '../database/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
+import { MarkReadDto } from './dto/mark-read.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
 export interface CreateChatResult {
@@ -31,6 +32,14 @@ export interface GetMessagesResult {
     limit: number;
     nextCursor: string | null;
   };
+}
+
+export interface ReadReceiptResult {
+  chatId: string;
+  messageId: string;
+  userId: string;
+  readAt: string;
+  isNew?: boolean;
 }
 
 @Injectable()
@@ -145,7 +154,6 @@ export class ChatService {
   ): Promise<PersistedMessage> {
     const { senderId, text } = dto;
 
-    // 1. Verify chat exists in PostgreSQL
     const chat = await this.prisma.chat.findUnique({
       where: { id: chatId },
     });
@@ -154,7 +162,6 @@ export class ChatService {
       throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
     }
 
-    // 2. Verify sender is a member of the chat in PostgreSQL
     const membership = await this.prisma.chatMember.findUnique({
       where: {
         chatId_userId: { chatId, userId: senderId },
@@ -167,7 +174,6 @@ export class ChatService {
       );
     }
 
-    // 3. Store message in Firestore under chats/{chatId}/messages/{messageId}
     const messageDocRef = this.firebase.getMessagesCollection(chatId).doc();
     const messageId = messageDocRef.id;
 
@@ -181,7 +187,6 @@ export class ChatService {
       `Persisted message '${messageId}' in chat '${chatId}' by sender '${senderId}'`,
     );
 
-    // 4. Fetch the persisted snapshot to return exact server timestamp
     const snapshot = await messageDocRef.get();
     const data = snapshot.data();
     const createdAtDate =
@@ -207,7 +212,6 @@ export class ChatService {
     query: GetMessagesQueryDto,
     headerUserId?: string,
   ): Promise<GetMessagesResult> {
-    // 1. Verify chat exists in PostgreSQL
     const chat = await this.prisma.chat.findUnique({
       where: { id: chatId },
     });
@@ -216,7 +220,6 @@ export class ChatService {
       throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
     }
 
-    // 2. Verify membership authorization if caller identity provided
     const callerId = query.userId || headerUserId;
     if (callerId) {
       const membership = await this.prisma.chatMember.findUnique({
@@ -232,7 +235,6 @@ export class ChatService {
       }
     }
 
-    // 3. Query messages in Firestore with deterministic sorting
     const limit = query.limit || 50;
     let firestoreQuery = this.firebase
       .getMessagesCollection(chatId)
@@ -240,7 +242,6 @@ export class ChatService {
       .orderBy(FieldPath.documentId(), 'asc')
       .limit(limit);
 
-    // 4. Cursor-based pagination
     if (query.cursor) {
       const cursorDoc = await this.firebase
         .getMessageDocument(chatId, query.cursor)
@@ -281,6 +282,103 @@ export class ChatService {
         limit,
         nextCursor,
       },
+    };
+  }
+
+  /**
+   * API 4: Mark Message Read
+   */
+  async markMessageRead(
+    chatId: string,
+    messageId: string,
+    dto: MarkReadDto,
+  ): Promise<ReadReceiptResult> {
+    const { userId } = dto;
+
+    // 1. Verify chat exists in PostgreSQL
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+    });
+
+    if (!chat) {
+      throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
+    }
+
+    // 2. Verify user is a member of the chat in PostgreSQL
+    const membership = await this.prisma.chatMember.findUnique({
+      where: {
+        chatId_userId: { chatId, userId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenException(
+        `User '${userId}' is not authorized as a member of chat '${chatId}'`,
+      );
+    }
+
+    // 3. Verify message exists in Firestore
+    const messageDocRef = this.firebase.getMessageDocument(chatId, messageId);
+    const messageDoc = await messageDocRef.get();
+
+    if (!messageDoc.exists) {
+      throw new NotFoundException(
+        `Message with ID '${messageId}' does not exist in chat '${chatId}'`,
+      );
+    }
+
+    // 4. Store read receipt in Firestore under chats/{chatId}/messages/{messageId}/readReceipts/{userId}
+    const receiptDocRef = this.firebase.getReadReceiptDocument(
+      chatId,
+      messageId,
+      userId,
+    );
+
+    const existingReceipt = await receiptDocRef.get();
+    if (existingReceipt.exists) {
+      const existingData = existingReceipt.data();
+      const existingReadAt =
+        existingData &&
+        existingData['readAt'] &&
+        typeof existingData['readAt'].toDate === 'function'
+          ? existingData['readAt'].toDate()
+          : new Date();
+
+      this.logger.log(
+        `Read receipt already exists for user '${userId}' on message '${messageId}' in chat '${chatId}'`,
+      );
+
+      return {
+        chatId,
+        messageId,
+        userId,
+        readAt: existingReadAt.toISOString(),
+        isNew: false,
+      };
+    }
+
+    await receiptDocRef.set({
+      userId,
+      readAt: this.firebase.getServerTimestamp(),
+    });
+
+    this.logger.log(
+      `Created read receipt for user '${userId}' on message '${messageId}' in chat '${chatId}'`,
+    );
+
+    const savedReceipt = await receiptDocRef.get();
+    const data = savedReceipt.data();
+    const readAtDate =
+      data && data['readAt'] && typeof data['readAt'].toDate === 'function'
+        ? data['readAt'].toDate()
+        : new Date();
+
+    return {
+      chatId,
+      messageId,
+      userId,
+      readAt: readAtDate.toISOString(),
+      isNew: true,
     };
   }
 }

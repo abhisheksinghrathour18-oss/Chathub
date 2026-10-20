@@ -17,4 +17,3 @@ export class GetMessagesQueryDto {
   @IsString()
   cursor?: string;
 }
-

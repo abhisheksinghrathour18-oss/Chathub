@@ -45,6 +45,16 @@ describe('ChatService', () => {
     joinedAt: new Date(),
   };
 
+  const mockReceiptDoc = {
+    exists: false,
+    set: jest.fn().mockResolvedValue({}),
+    get: jest.fn(),
+    data: jest.fn().mockReturnValue({
+      userId: 'user-aaa',
+      readAt: { toDate: () => new Date('2026-10-20T13:00:00Z') },
+    }),
+  };
+
   beforeEach(async () => {
     const mockPrismaService = {
       user: {
@@ -63,8 +73,10 @@ describe('ChatService', () => {
 
     const mockMessageDoc = {
       id: 'msg-999',
+      exists: true,
       set: jest.fn().mockResolvedValue({}),
       get: jest.fn().mockResolvedValue({
+        exists: true,
         data: () => ({
           senderId: 'user-aaa',
           text: 'Hello World',
@@ -113,9 +125,8 @@ describe('ChatService', () => {
         doc: jest.fn().mockReturnValue(mockMessageDoc),
         ...mockMessagesQuery,
       }),
-      getMessageDocument: jest.fn().mockReturnValue({
-        get: jest.fn().mockResolvedValue({ exists: true }),
-      }),
+      getMessageDocument: jest.fn().mockReturnValue(mockMessageDoc),
+      getReadReceiptDocument: jest.fn().mockReturnValue(mockReceiptDoc),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -320,6 +331,117 @@ describe('ChatService', () => {
       expect(result.messages[1]?.id).toBe('msg-2');
       expect(result.pagination.limit).toBe(50);
       expect(result.pagination.nextCursor).toBeNull();
+    });
+  });
+
+  describe('markMessageRead', () => {
+    it('should throw NotFoundException if chat does not exist', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(
+        service.markMessageRead('non-existent-chat', 'msg-1', {
+          userId: 'user-aaa',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should throw ForbiddenException if user is not a member', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(
+        service.markMessageRead('chat-111', 'msg-1', {
+          userId: 'stranger-user',
+        }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should throw NotFoundException if message does not exist in Firestore', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({ exists: false }),
+      });
+
+      await expect(
+        service.markMessageRead('chat-111', 'msg-missing', {
+          userId: 'user-aaa',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should write new read receipt when not previously read', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({ exists: true }),
+      });
+
+      const receiptRef = {
+        get: jest
+          .fn()
+          .mockResolvedValueOnce({ exists: false })
+          .mockResolvedValueOnce({
+            exists: true,
+            data: () => ({
+              userId: 'user-aaa',
+              readAt: { toDate: () => new Date('2026-10-20T13:00:00Z') },
+            }),
+          }),
+        set: jest.fn().mockResolvedValue({}),
+      };
+      (firebase.getReadReceiptDocument as jest.Mock).mockReturnValue(
+        receiptRef,
+      );
+
+      const result = await service.markMessageRead('chat-111', 'msg-1', {
+        userId: 'user-aaa',
+      });
+
+      expect(result.chatId).toBe('chat-111');
+      expect(result.messageId).toBe('msg-1');
+      expect(result.userId).toBe('user-aaa');
+      expect(result.isNew).toBe(true);
+      expect(receiptRef.set).toHaveBeenCalled();
+    });
+
+    it('should return existing read receipt idempotently if already read', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({ exists: true }),
+      });
+
+      const receiptRef = {
+        get: jest.fn().mockResolvedValue({
+          exists: true,
+          data: () => ({
+            userId: 'user-aaa',
+            readAt: { toDate: () => new Date('2026-10-20T12:30:00Z') },
+          }),
+        }),
+        set: jest.fn(),
+      };
+      (firebase.getReadReceiptDocument as jest.Mock).mockReturnValue(
+        receiptRef,
+      );
+
+      const result = await service.markMessageRead('chat-111', 'msg-1', {
+        userId: 'user-aaa',
+      });
+
+      expect(result.chatId).toBe('chat-111');
+      expect(result.isNew).toBe(false);
+      expect(result.readAt).toBe(
+        new Date('2026-10-20T12:30:00Z').toISOString(),
+      );
+      expect(receiptRef.set).not.toHaveBeenCalled();
     });
   });
 });

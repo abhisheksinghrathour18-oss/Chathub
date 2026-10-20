@@ -10,4 +10,3 @@ export class SendMessageDto {
   @MaxLength(5000, { message: 'text must not exceed 5000 characters' })
   text!: string;
 }
-
