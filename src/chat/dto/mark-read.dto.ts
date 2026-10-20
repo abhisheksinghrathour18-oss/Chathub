@@ -5,4 +5,3 @@ export class MarkReadDto {
   @IsNotEmpty({ message: 'userId must not be empty' })
   userId!: string;
 }
-

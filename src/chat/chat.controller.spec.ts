@@ -12,6 +12,7 @@ describe('ChatController', () => {
       sendMessage: jest.fn(),
       getMessages: jest.fn(),
       markMessageRead: jest.fn(),
+      updateLastSeen: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -107,6 +108,27 @@ describe('ChatController', () => {
     expect(result).toEqual(mockReceipt);
     expect(service.markMessageRead).toHaveBeenCalledWith('chat-1', 'msg-123', {
       userId: 'user-2',
+    });
+  });
+
+  it('should delegate updateLastSeen to service and return result', async () => {
+    const mockLastSeenResult = {
+      chatId: 'chat-1',
+      userId: 'user-2',
+      messageId: 'msg-123',
+      updatedAt: '2026-10-20T13:05:00.000Z',
+    };
+    service.updateLastSeen.mockResolvedValue(mockLastSeenResult);
+
+    const result = await controller.updateLastSeen('chat-1', {
+      userId: 'user-2',
+      messageId: 'msg-123',
+    });
+
+    expect(result).toEqual(mockLastSeenResult);
+    expect(service.updateLastSeen).toHaveBeenCalledWith('chat-1', {
+      userId: 'user-2',
+      messageId: 'msg-123',
     });
   });
 });

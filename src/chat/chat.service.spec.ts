@@ -55,6 +55,22 @@ describe('ChatService', () => {
     }),
   };
 
+  const mockLastSeenDoc = {
+    exists: false,
+    set: jest.fn().mockResolvedValue({}),
+    get: jest.fn().mockResolvedValue({
+      exists: true,
+      data: () => ({
+        messageId: 'msg-1',
+        updatedAt: { toDate: () => new Date('2026-10-20T13:00:00Z') },
+      }),
+    }),
+    data: jest.fn().mockReturnValue({
+      messageId: 'msg-1',
+      updatedAt: { toDate: () => new Date('2026-10-20T13:00:00Z') },
+    }),
+  };
+
   beforeEach(async () => {
     const mockPrismaService = {
       user: {
@@ -80,7 +96,10 @@ describe('ChatService', () => {
         data: () => ({
           senderId: 'user-aaa',
           text: 'Hello World',
-          createdAt: { toDate: () => new Date('2026-10-20T12:00:00Z') },
+          createdAt: {
+            toDate: () => new Date('2026-10-20T12:00:00Z'),
+            toMillis: () => 1700000000000,
+          },
         }),
       }),
     };
@@ -119,7 +138,28 @@ describe('ChatService', () => {
     mockMessagesQuery.limit.mockReturnValue(mockMessagesQuery);
     mockMessagesQuery.startAfter.mockReturnValue(mockMessagesQuery);
 
+    const mockFirestore = {
+      runTransaction: jest
+        .fn()
+        .mockImplementation(
+          async (callback: (tx: unknown) => Promise<unknown>) => {
+            const txMock = {
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({
+                  messageId: 'msg-1',
+                  createdAt: { toMillis: () => 1700000000000 },
+                }),
+              }),
+              set: jest.fn(),
+            };
+            return callback(txMock);
+          },
+        ),
+    };
+
     const mockFirebaseService = {
+      firestore: mockFirestore,
       getServerTimestamp: jest.fn().mockReturnValue('SERVER_TIMESTAMP'),
       getMessagesCollection: jest.fn().mockReturnValue({
         doc: jest.fn().mockReturnValue(mockMessageDoc),
@@ -127,6 +167,7 @@ describe('ChatService', () => {
       }),
       getMessageDocument: jest.fn().mockReturnValue(mockMessageDoc),
       getReadReceiptDocument: jest.fn().mockReturnValue(mockReceiptDoc),
+      getLastSeenDocument: jest.fn().mockReturnValue(mockLastSeenDoc),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -442,6 +483,146 @@ describe('ChatService', () => {
         new Date('2026-10-20T12:30:00Z').toISOString(),
       );
       expect(receiptRef.set).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateLastSeen', () => {
+    it('should throw NotFoundException if chat does not exist', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(
+        service.updateLastSeen('non-existent-chat', {
+          userId: 'user-aaa',
+          messageId: 'msg-1',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should throw ForbiddenException if user is not a member', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(
+        service.updateLastSeen('chat-111', {
+          userId: 'stranger-user',
+          messageId: 'msg-1',
+        }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should throw NotFoundException if target message does not exist', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({ exists: false }),
+      });
+
+      await expect(
+        service.updateLastSeen('chat-111', {
+          userId: 'user-aaa',
+          messageId: 'missing-msg',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should reject moving last-seen backwards in time with BadRequestException', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+
+      // Target message has older timestamp (1000)
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({
+          exists: true,
+          data: () => ({
+            createdAt: { toMillis: () => 1000 },
+          }),
+        }),
+      });
+
+      // Transaction reads current last seen message with newer timestamp (2000)
+      (firebase.firestore.runTransaction as jest.Mock).mockImplementation(
+        async (callback: (tx: unknown) => Promise<unknown>) => {
+          const txMock = {
+            get: jest.fn().mockImplementation((ref) => {
+              if (ref === mockLastSeenDoc) {
+                return Promise.resolve({
+                  exists: true,
+                  data: () => ({ messageId: 'newer-msg' }),
+                });
+              }
+              // Current message document
+              return Promise.resolve({
+                exists: true,
+                data: () => ({
+                  createdAt: { toMillis: () => 2000 },
+                }),
+              });
+            }),
+            set: jest.fn(),
+          };
+          return callback(txMock);
+        },
+      );
+
+      await expect(
+        service.updateLastSeen('chat-111', {
+          userId: 'user-aaa',
+          messageId: 'older-msg',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should update last-seen successfully when moving forward', async () => {
+      (prisma.chat.findUnique as jest.Mock).mockResolvedValue(mockChat);
+      (prisma.chatMember.findUnique as jest.Mock).mockResolvedValue(
+        mockMembership,
+      );
+
+      (firebase.getMessageDocument as jest.Mock).mockReturnValue({
+        get: jest.fn().mockResolvedValue({
+          exists: true,
+          data: () => ({
+            createdAt: { toMillis: () => 3000 },
+          }),
+        }),
+      });
+
+      (firebase.firestore.runTransaction as jest.Mock).mockImplementation(
+        async (callback: (tx: unknown) => Promise<unknown>) => {
+          const txMock = {
+            get: jest.fn().mockImplementation((ref) => {
+              if (ref === mockLastSeenDoc) {
+                return Promise.resolve({
+                  exists: true,
+                  data: () => ({ messageId: 'older-msg' }),
+                });
+              }
+              return Promise.resolve({
+                exists: true,
+                data: () => ({
+                  createdAt: { toMillis: () => 2000 },
+                }),
+              });
+            }),
+            set: jest.fn(),
+          };
+          return callback(txMock);
+        },
+      );
+
+      const result = await service.updateLastSeen('chat-111', {
+        userId: 'user-aaa',
+        messageId: 'msg-newer',
+      });
+
+      expect(result.chatId).toBe('chat-111');
+      expect(result.userId).toBe('user-aaa');
+      expect(result.messageId).toBe('msg-newer');
+      expect(result).toHaveProperty('updatedAt');
     });
   });
 });

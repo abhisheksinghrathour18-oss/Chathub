@@ -13,6 +13,7 @@ import {
   ChatService,
   CreateChatResult,
   GetMessagesResult,
+  LastSeenResult,
   PersistedMessage,
   ReadReceiptResult,
 } from './chat.service';
@@ -20,6 +21,7 @@ import { CreateChatDto } from './dto/create-chat.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { UpdateLastSeenDto } from './dto/update-last-seen.dto';
 
 @Controller('chat')
 export class ChatController {
@@ -73,5 +75,18 @@ export class ChatController {
     @Body() dto: MarkReadDto,
   ): Promise<ReadReceiptResult> {
     return this.chatService.markMessageRead(chatId, messageId, dto);
+  }
+
+  /**
+   * API 5: Update Last Seen Message
+   * POST /api/chat/:chatId/lastseen
+   */
+  @Post(':chatId/lastseen')
+  @HttpCode(HttpStatus.OK)
+  async updateLastSeen(
+    @Param('chatId') chatId: string,
+    @Body() dto: UpdateLastSeenDto,
+  ): Promise<LastSeenResult> {
+    return this.chatService.updateLastSeen(chatId, dto);
   }
 }
