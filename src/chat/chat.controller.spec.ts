@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ChatType, MemberRole } from '@prisma/client';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 
@@ -13,6 +14,11 @@ describe('ChatController', () => {
       getMessages: jest.fn(),
       markMessageRead: jest.fn(),
       updateLastSeen: jest.fn(),
+      createGroupChat: jest.fn(),
+      getGroupDetails: jest.fn(),
+      addGroupMember: jest.fn(),
+      removeGroupMember: jest.fn(),
+      leaveGroup: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -129,6 +135,113 @@ describe('ChatController', () => {
     expect(service.updateLastSeen).toHaveBeenCalledWith('chat-1', {
       userId: 'user-2',
       messageId: 'msg-123',
+    });
+  });
+
+  describe('Milestone 10: Group Chat Endpoints', () => {
+    it('should delegate createGroupChat to service and return result', async () => {
+      const mockResult = {
+        chatId: 'group-1',
+        name: 'Dev Team',
+        type: ChatType.GROUP,
+        creatorId: 'user-1',
+        members: [
+          { userId: 'user-1', role: MemberRole.ADMIN },
+          { userId: 'user-2', role: MemberRole.MEMBER },
+        ],
+        createdAt: '2026-10-21T00:00:00.000Z',
+      };
+      service.createGroupChat.mockResolvedValue(mockResult);
+
+      const dto = {
+        name: 'Dev Team',
+        creatorId: 'user-1',
+        memberIds: ['user-2'],
+      };
+      const result = await controller.createGroupChat(dto);
+
+      expect(result).toEqual(mockResult);
+      expect(service.createGroupChat).toHaveBeenCalledWith(dto);
+    });
+
+    it('should delegate getGroupDetails to service with query userId', async () => {
+      const mockResult = {
+        chatId: 'group-1',
+        name: 'Dev Team',
+        type: ChatType.GROUP,
+        creatorId: 'user-1',
+        members: [
+          {
+            userId: 'user-1',
+            name: 'User 1',
+            email: 'u1@example.com',
+            role: MemberRole.ADMIN,
+            joinedAt: '2026-10-21T00:00:00.000Z',
+          },
+        ],
+        memberCount: 1,
+        createdAt: '2026-10-21T00:00:00.000Z',
+        updatedAt: '2026-10-21T00:00:00.000Z',
+      };
+      service.getGroupDetails.mockResolvedValue(mockResult);
+
+      const result = await controller.getGroupDetails('group-1', {
+        userId: 'user-1',
+      });
+
+      expect(result).toEqual(mockResult);
+      expect(service.getGroupDetails).toHaveBeenCalledWith('group-1', 'user-1');
+    });
+
+    it('should delegate addGroupMember to service and return result', async () => {
+      const mockResult = {
+        chatId: 'group-1',
+        userId: 'user-3',
+        role: MemberRole.MEMBER,
+        joinedAt: '2026-10-21T00:00:00.000Z',
+      };
+      service.addGroupMember.mockResolvedValue(mockResult);
+
+      const dto = { actingUserId: 'user-1', userId: 'user-3' };
+      const result = await controller.addGroupMember('group-1', dto);
+
+      expect(result).toEqual(mockResult);
+      expect(service.addGroupMember).toHaveBeenCalledWith('group-1', dto);
+    });
+
+    it('should delegate removeGroupMember to service and return result', async () => {
+      const mockResult = {
+        chatId: 'group-1',
+        userId: 'user-3',
+        removed: true,
+      };
+      service.removeGroupMember.mockResolvedValue(mockResult);
+
+      const result = await controller.removeGroupMember('group-1', 'user-3', {
+        actingUserId: 'user-1',
+      });
+
+      expect(result).toEqual(mockResult);
+      expect(service.removeGroupMember).toHaveBeenCalledWith(
+        'group-1',
+        'user-3',
+        'user-1',
+      );
+    });
+
+    it('should delegate leaveGroup to service and return result', async () => {
+      const mockResult = {
+        chatId: 'group-1',
+        userId: 'user-2',
+        left: true,
+      };
+      service.leaveGroup.mockResolvedValue(mockResult);
+
+      const dto = { userId: 'user-2' };
+      const result = await controller.leaveGroup('group-1', dto);
+
+      expect(result).toEqual(mockResult);
+      expect(service.leaveGroup).toHaveBeenCalledWith('group-1', dto);
     });
   });
 });

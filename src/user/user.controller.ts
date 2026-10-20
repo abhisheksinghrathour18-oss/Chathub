@@ -31,6 +31,8 @@ export class UserController {
         chats: [
           {
             chatId: '6b6eb37e-5b65-44eb-9ec9-585b6e80f01c',
+            type: 'DIRECT',
+            name: null,
             memberIds: [
               '78a15aac-0d92-4ca9-ab67-70a78b569581',
               '05044ae6-ed94-405c-9416-36340b4842a6',

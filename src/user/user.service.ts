@@ -3,6 +3,8 @@ import { PrismaService } from '../database/prisma.service';
 
 export interface UserChatItem {
   chatId: string;
+  type?: string;
+  name?: string | null;
   memberIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -56,6 +58,8 @@ export class UserService {
 
       return {
         chatId: chat.id,
+        type: chat.type,
+        name: chat.name,
         memberIds,
         createdAt: chat.createdAt.toISOString(),
         updatedAt: chat.updatedAt.toISOString(),
