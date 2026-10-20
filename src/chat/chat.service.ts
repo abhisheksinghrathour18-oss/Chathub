@@ -13,6 +13,7 @@ import { CreateChatDto } from './dto/create-chat.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { UpdateLastSeenDto } from './dto/update-last-seen.dto';
 
 export interface CreateChatResult {
   chatId: string;
@@ -40,6 +41,13 @@ export interface ReadReceiptResult {
   userId: string;
   readAt: string;
   isNew?: boolean;
+}
+
+export interface LastSeenResult {
+  chatId: string;
+  userId: string;
+  messageId: string;
+  updatedAt: string;
 }
 
 @Injectable()
@@ -190,9 +198,7 @@ export class ChatService {
     const snapshot = await messageDocRef.get();
     const data = snapshot.data();
     const createdAtDate =
-      data &&
-      data['createdAt'] &&
-      typeof data['createdAt'].toDate === 'function'
+      data && data['createdAt'] && typeof data['createdAt'].toDate === 'function'
         ? data['createdAt'].toDate()
         : new Date();
 
@@ -271,9 +277,7 @@ export class ChatService {
     });
 
     const nextCursor =
-      messages.length === limit
-        ? (messages[messages.length - 1]?.id ?? null)
-        : null;
+      messages.length === limit ? messages[messages.length - 1]?.id ?? null : null;
 
     return {
       chatId,
@@ -295,7 +299,6 @@ export class ChatService {
   ): Promise<ReadReceiptResult> {
     const { userId } = dto;
 
-    // 1. Verify chat exists in PostgreSQL
     const chat = await this.prisma.chat.findUnique({
       where: { id: chatId },
     });
@@ -304,7 +307,6 @@ export class ChatService {
       throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
     }
 
-    // 2. Verify user is a member of the chat in PostgreSQL
     const membership = await this.prisma.chatMember.findUnique({
       where: {
         chatId_userId: { chatId, userId },
@@ -317,7 +319,6 @@ export class ChatService {
       );
     }
 
-    // 3. Verify message exists in Firestore
     const messageDocRef = this.firebase.getMessageDocument(chatId, messageId);
     const messageDoc = await messageDocRef.get();
 
@@ -327,7 +328,6 @@ export class ChatService {
       );
     }
 
-    // 4. Store read receipt in Firestore under chats/{chatId}/messages/{messageId}/readReceipts/{userId}
     const receiptDocRef = this.firebase.getReadReceiptDocument(
       chatId,
       messageId,
@@ -369,7 +369,9 @@ export class ChatService {
     const savedReceipt = await receiptDocRef.get();
     const data = savedReceipt.data();
     const readAtDate =
-      data && data['readAt'] && typeof data['readAt'].toDate === 'function'
+      data &&
+      data['readAt'] &&
+      typeof data['readAt'].toDate === 'function'
         ? data['readAt'].toDate()
         : new Date();
 
@@ -381,4 +383,245 @@ export class ChatService {
       isNew: true,
     };
   }
+
+  /**
+   * API 5: Update Last Seen Message
+   */
+  async updateLastSeen(
+    chatId: string,
+    dto: UpdateLastSeenDto,
+  ): Promise<LastSeenResult> {
+    const { userId, messageId } = dto;
+
+    // 1. Verify chat exists in PostgreSQL
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+    });
+
+    if (!chat) {
+      throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
+    }
+
+    // 2. Verify user is a member of the chat in PostgreSQL
+    const membership = await this.prisma.chatMember.findUnique({
+      where: {
+        chatId_userId: { chatId, userId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenException(
+        `User '${userId}' is not authorized as a member of chat '${chatId}'`,
+      );
+    }
+
+    // 3. Verify message exists and belongs to this chat in Firestore
+    const targetMessageRef = this.firebase.getMessageDocument(
+      chatId,
+      messageId,
+    );
+    const targetMessageSnap = await targetMessageRef.get();
+
+    if (!targetMessageSnap.exists) {
+      throw new NotFoundException(
+        `Message '${messageId}' does not exist in chat '${chatId}'`,
+      );
+    }
+
+    const targetData = targetMessageSnap.data();
+    const targetTimestampMs =
+      targetData &&
+      targetData['createdAt'] &&
+      typeof targetData['createdAt'].toMillis === 'function'
+        ? targetData['createdAt'].toMillis()
+        : 0;
+
+    // 4. Safely update last-seen in Firestore with backwards-movement prevention
+    const lastSeenRef = this.firebase.getLastSeenDocument(chatId, userId);
+
+    await this.firebase.firestore.runTransaction(async (transaction) => {
+      const currentLastSeenSnap = await transaction.get(lastSeenRef);
+
+      if (currentLastSeenSnap.exists) {
+        const currentData = currentLastSeenSnap.data();
+        const currentMessageId = currentData?.['messageId'] as string;
+
+        if (currentMessageId === messageId) {
+          return;
+        }
+
+        if (currentMessageId) {
+          const currentMessageRef = this.firebase.getMessageDocument(
+            chatId,
+            currentMessageId,
+          );
+          const currentMessageSnap = await transaction.get(currentMessageRef);
+
+          if (currentMessageSnap.exists) {
+            const currentMsgData = currentMessageSnap.data();
+            const currentTimestampMs =
+              currentMsgData &&
+              currentMsgData['createdAt'] &&
+              typeof currentMsgData['createdAt'].toMillis === 'function'
+                ? currentMsgData['createdAt'].toMillis()
+                : 0;
+
+            if (
+              targetTimestampMs < currentTimestampMs ||
+              (targetTimestampMs === currentTimestampMs &&
+                messageId < currentMessageId)
+            ) {
+              throw new BadRequestException(
+                'Cannot move last-seen message backwards in time',
+              );
+            }
+          }
+        }
+      }
+
+      transaction.set(lastSeenRef, {
+        messageId,
+        updatedAt: this.firebase.getServerTimestamp(),
+      });
+    });
+
+    this.logger.log(
+      `Updated last-seen message to '${messageId}' for user '${userId}' in chat '${chatId}'`,
+    );
+
+    const updatedSnap = await lastSeenRef.get();
+    const updatedData = updatedSnap.data();
+    const updatedAtDate =
+      updatedData &&
+      updatedData['updatedAt'] &&
+      typeof updatedData['updatedAt'].toDate === 'function'
+        ? updatedData['updatedAt'].toDate()
+        : new Date();
+
+    return {
+      chatId,
+      userId,
+      messageId,
+      updatedAt: updatedAtDate.toISOString(),
+    };
+  }
+
+  /**
+   * API 5: Update Last Seen Message
+   */
+  async updateLastSeen(
+    chatId: string,
+    dto: UpdateLastSeenDto,
+  ): Promise<LastSeenResult> {
+    const { userId, messageId } = dto;
+
+    // 1. Verify chat exists in PostgreSQL
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+    });
+
+    if (!chat) {
+      throw new NotFoundException(`Chat with ID '${chatId}' does not exist`);
+    }
+
+    // 2. Verify user is a member of the chat in PostgreSQL
+    const membership = await this.prisma.chatMember.findUnique({
+      where: {
+        chatId_userId: { chatId, userId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenException(
+        `User '${userId}' is not authorized as a member of chat '${chatId}'`,
+      );
+    }
+
+    // 3. Verify message exists and belongs to this chat in Firestore
+    const targetMessageRef = this.firebase.getMessageDocument(chatId, messageId);
+    const targetMessageSnap = await targetMessageRef.get();
+
+    if (!targetMessageSnap.exists) {
+      throw new NotFoundException(
+        `Message '${messageId}' does not exist in chat '${chatId}'`,
+      );
+    }
+
+    const targetData = targetMessageSnap.data();
+    const targetTimestampMs =
+      targetData &&
+      targetData['createdAt'] &&
+      typeof targetData['createdAt'].toMillis === 'function'
+        ? targetData['createdAt'].toMillis()
+        : 0;
+
+    // 4. Safely update last-seen in Firestore with backwards-movement prevention
+    const lastSeenRef = this.firebase.getLastSeenDocument(chatId, userId);
+
+    await this.firebase.firestore.runTransaction(async (transaction) => {
+      const currentLastSeenSnap = await transaction.get(lastSeenRef);
+
+      if (currentLastSeenSnap.exists) {
+        const currentData = currentLastSeenSnap.data();
+        const currentMessageId = currentData?.['messageId'] as string;
+
+        if (currentMessageId === messageId) {
+          return;
+        }
+
+        if (currentMessageId) {
+          const currentMessageRef = this.firebase.getMessageDocument(
+            chatId,
+            currentMessageId,
+          );
+          const currentMessageSnap = await transaction.get(currentMessageRef);
+
+          if (currentMessageSnap.exists) {
+            const currentMsgData = currentMessageSnap.data();
+            const currentTimestampMs =
+              currentMsgData &&
+              currentMsgData['createdAt'] &&
+              typeof currentMsgData['createdAt'].toMillis === 'function'
+                ? currentMsgData['createdAt'].toMillis()
+                : 0;
+
+            if (
+              targetTimestampMs < currentTimestampMs ||
+              (targetTimestampMs === currentTimestampMs && messageId < currentMessageId)
+            ) {
+              throw new BadRequestException(
+                'Cannot move last-seen message backwards in time',
+              );
+            }
+          }
+        }
+      }
+
+      transaction.set(lastSeenRef, {
+        messageId,
+        updatedAt: this.firebase.getServerTimestamp(),
+      });
+    });
+
+    this.logger.log(
+      `Updated last-seen message to '${messageId}' for user '${userId}' in chat '${chatId}'`,
+    );
+
+    const updatedSnap = await lastSeenRef.get();
+    const updatedData = updatedSnap.data();
+    const updatedAtDate =
+      updatedData &&
+      updatedData['updatedAt'] &&
+      typeof updatedData['updatedAt'].toDate === 'function'
+        ? updatedData['updatedAt'].toDate()
+        : new Date();
+
+    return {
+      chatId,
+      userId,
+      messageId,
+      updatedAt: updatedAtDate.toISOString(),
+    };
+  }
 }
+

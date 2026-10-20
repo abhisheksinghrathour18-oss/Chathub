@@ -30,20 +30,20 @@ describe('Chat API (e2e)', () => {
     prisma = app.get(PrismaService);
 
     const userA = await prisma.user.upsert({
-      where: { email: 'alice-e2e-m6@example.com' },
+      where: { email: 'alice-e2e-m7@example.com' },
       update: {},
       create: {
-        email: 'alice-e2e-m6@example.com',
-        name: 'Alice E2E M6',
+        email: 'alice-e2e-m7@example.com',
+        name: 'Alice E2E M7',
       },
     });
 
     const userB = await prisma.user.upsert({
-      where: { email: 'bob-e2e-m6@example.com' },
+      where: { email: 'bob-e2e-m7@example.com' },
       update: {},
       create: {
-        email: 'bob-e2e-m6@example.com',
-        name: 'Bob E2E M6',
+        email: 'bob-e2e-m7@example.com',
+        name: 'Bob E2E M7',
       },
     });
 
@@ -139,6 +139,22 @@ describe('Chat API (e2e)', () => {
     await request(app.getHttpServer())
       .post(`/api/chat/${fakeChatId}/message/msg-123/read`)
       .send({ userId: userAId })
+      .expect(404);
+  });
+
+  it('POST /api/chat/:chatId/lastseen - should reject non-member with 403', async () => {
+    const strangerId = '00000000-0000-0000-0000-000000000099';
+    await request(app.getHttpServer())
+      .post(`/api/chat/${chatId}/lastseen`)
+      .send({ userId: strangerId, messageId: 'msg-123' })
+      .expect(403);
+  });
+
+  it('POST /api/chat/:chatId/lastseen - should reject non-existent chat with 404', async () => {
+    const fakeChatId = '00000000-0000-0000-0000-000000000000';
+    await request(app.getHttpServer())
+      .post(`/api/chat/${fakeChatId}/lastseen`)
+      .send({ userId: userAId, messageId: 'msg-123' })
       .expect(404);
   });
 });
