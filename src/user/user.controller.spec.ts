@@ -43,4 +43,3 @@ describe('UserController', () => {
     expect(service.getUserChats).toHaveBeenCalledWith('user-1');
   });
 });
-

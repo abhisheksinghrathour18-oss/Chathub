@@ -198,7 +198,9 @@ export class ChatService {
     const snapshot = await messageDocRef.get();
     const data = snapshot.data();
     const createdAtDate =
-      data && data['createdAt'] && typeof data['createdAt'].toDate === 'function'
+      data &&
+      data['createdAt'] &&
+      typeof data['createdAt'].toDate === 'function'
         ? data['createdAt'].toDate()
         : new Date();
 
@@ -277,7 +279,9 @@ export class ChatService {
     });
 
     const nextCursor =
-      messages.length === limit ? messages[messages.length - 1]?.id ?? null : null;
+      messages.length === limit
+        ? (messages[messages.length - 1]?.id ?? null)
+        : null;
 
     return {
       chatId,
@@ -369,9 +373,7 @@ export class ChatService {
     const savedReceipt = await receiptDocRef.get();
     const data = savedReceipt.data();
     const readAtDate =
-      data &&
-      data['readAt'] &&
-      typeof data['readAt'].toDate === 'function'
+      data && data['readAt'] && typeof data['readAt'].toDate === 'function'
         ? data['readAt'].toDate()
         : new Date();
 
@@ -506,4 +508,3 @@ export class ChatService {
     };
   }
 }
-
