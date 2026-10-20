@@ -20,6 +20,7 @@
 - [Prerequisites & Environment Setup](#prerequisites--environment-setup)
 - [Getting Started](#getting-started)
 - [Testing](#testing)
+- [Code Quality, Linting & Formatting](#-code-quality-linting--formatting)
 - [Security & Production Considerations](#security--production-considerations)
 
 ---
@@ -73,12 +74,12 @@ ChatHub is a production-grade 1:1 chat backend service designed for high through
 
 | Component | Technology | Version |
 | :--- | :--- | :--- |
-| **Runtime** | Node.js (LTS) | `v20+` / `v24+` |
+| **Runtime** | Node.js | Node.js 22 or newer, using a currently supported release |
 | **Framework** | NestJS | `^10.4.15` |
 | **Language** | TypeScript (Strict Mode) | `^5.7.3` |
 | **Database** | PostgreSQL | `16-alpine` |
 | **ORM** | Prisma ORM | `^6.4.1` |
-| **Realtime Storage**| Firebase Admin SDK | `^13.1.0` |
+| **Realtime Storage**| Firebase Admin SDK | `^14.5.0` |
 | **Validation** | class-validator & class-transformer | `^0.14.1` / `^0.5.1` |
 | **Documentation** | Swagger / OpenAPI | `@nestjs/swagger ^7.4.2` |
 | **Testing** | Jest & Supertest | `^29.7.0` / `^7.0.0` |
@@ -268,7 +269,7 @@ Swagger UI provides interactive request execution, DTO schemas, and detailed err
 
 ## ⚙️ Prerequisites & Environment Setup
 
-1. **Node.js**: `v20.x` or `v24.x`
+1. **Node.js**: Node.js 22 or newer, using a currently supported release
 2. **Docker & Docker Compose**: Installed and running
 3. **Configure Environment Variables**:
    ```bash
@@ -319,6 +320,13 @@ npm run start:dev
 ```
 Application will be available at `http://localhost:3000/api`.
 
+### 5. Production Build & Run
+```bash
+npm run build
+npm run start:prod
+```
+*`npm run build` compiles TypeScript to `dist/`, and `npm run start:prod` executes the entrypoint `node dist/main.js`.*
+
 ---
 
 ## 🧪 Testing
@@ -335,11 +343,35 @@ npm run test:e2e
 ```
 *Executes 15 comprehensive E2E tests validating PostgreSQL transactions, Firestore constraints, status codes, and idempotency.*
 
-### Code Quality & Formatting
-```bash
-npm run format
-npm run lint
-```
+---
+
+## 🧹 Code Quality, Linting & Formatting
+
+Formatting and linting are maintained as separate, purpose-built commands:
+
+### 1. Code Formatting (Prettier)
+- **Check formatting (Read-only, does not modify files)**:
+  ```bash
+  npm run format:check
+  ```
+  *Verifies all files conform to Prettier rules without touching disk.*
+- **Apply formatting (Modifies files in-place)**:
+  ```bash
+  npm run format
+  ```
+  *Runs `prettier --write` to automatically format and overwrite code across `src/` and `test/`.*
+
+### 2. Static Code Analysis & Linting (ESLint)
+- **Run linter**:
+  ```bash
+  npm run lint
+  ```
+  *Enforces ESLint rules with `--max-warnings=0` (fails if any warning/error exists).*
+- **Auto-fix linter issues**:
+  ```bash
+  npm run lint:fix
+  ```
+  *Automatically applies safe ESLint fixes where possible.*
 
 ---
 
