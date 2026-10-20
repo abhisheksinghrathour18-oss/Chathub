@@ -23,4 +23,3 @@ describe('HealthController', () => {
     expect(typeof result.uptime).toBe('number');
   });
 });
-
