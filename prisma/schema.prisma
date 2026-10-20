@@ -7,6 +7,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ChatType {
+  DIRECT
+  GROUP
+}
+
+enum MemberRole {
+  ADMIN
+  MEMBER
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
@@ -17,32 +27,39 @@ model User {
   memberships  ChatMember[]
   chatsAsUser1 Chat[]       @relation("ChatUser1")
   chatsAsUser2 Chat[]       @relation("ChatUser2")
+  createdChats Chat[]       @relation("ChatCreator")
 
   @@map("users")
 }
 
 model Chat {
-  id        String   @id @default(uuid())
-  user1Id   String
-  user2Id   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String       @id @default(uuid())
+  type        ChatType     @default(DIRECT)
+  name        String?
+  user1Id     String?
+  user2Id     String?
+  createdById String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
-  user1   User         @relation("ChatUser1", fields: [user1Id], references: [id], onDelete: Cascade)
-  user2   User         @relation("ChatUser2", fields: [user2Id], references: [id], onDelete: Cascade)
-  members ChatMember[]
+  user1       User?        @relation("ChatUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2       User?        @relation("ChatUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+  createdBy   User?        @relation("ChatCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  members     ChatMember[]
 
   @@unique([user1Id, user2Id])
   @@index([user1Id])
   @@index([user2Id])
+  @@index([type])
   @@map("chats")
 }
 
 model ChatMember {
-  id       String   @id @default(uuid())
+  id       String     @id @default(uuid())
   chatId   String
   userId   String
-  joinedAt DateTime @default(now())
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
 
   chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -52,4 +69,3 @@ model ChatMember {
   @@index([chatId])
   @@map("chat_members")
 }
-

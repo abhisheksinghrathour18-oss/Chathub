@@ -1,10 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { ChatType, MemberRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { ChatService } from './chat.service';
@@ -75,6 +76,7 @@ describe('ChatService', () => {
     const mockPrismaService = {
       user: {
         findUnique: jest.fn(),
+        findMany: jest.fn(),
       },
       chat: {
         findUnique: jest.fn(),
@@ -82,7 +84,10 @@ describe('ChatService', () => {
       },
       chatMember: {
         findUnique: jest.fn(),
+        findMany: jest.fn(),
+        create: jest.fn(),
         createMany: jest.fn(),
+        delete: jest.fn(),
       },
       $transaction: jest.fn(),
     };
@@ -623,6 +628,326 @@ describe('ChatService', () => {
       expect(result.userId).toBe('user-aaa');
       expect(result.messageId).toBe('msg-newer');
       expect(result).toHaveProperty('updatedAt');
+    });
+  });
+
+  describe('Milestone 10: Group Chat Management', () => {
+    const mockGroupChat = {
+      id: 'group-chat-1',
+      type: ChatType.GROUP,
+      name: 'Dev Team',
+      createdById: 'user-aaa',
+      user1Id: null,
+      user2Id: null,
+      createdAt: new Date('2026-10-21T00:00:00Z'),
+      updatedAt: new Date('2026-10-21T00:00:00Z'),
+      members: [
+        {
+          id: 'mem-1',
+          chatId: 'group-chat-1',
+          userId: 'user-aaa',
+          role: MemberRole.ADMIN,
+          joinedAt: new Date('2026-10-21T00:00:00Z'),
+          user: {
+            id: 'user-aaa',
+            name: 'User A',
+            email: 'usera@example.com',
+          },
+        },
+        {
+          id: 'mem-2',
+          chatId: 'group-chat-1',
+          userId: 'user-bbb',
+          role: MemberRole.MEMBER,
+          joinedAt: new Date('2026-10-21T00:00:00Z'),
+          user: {
+            id: 'user-bbb',
+            name: 'User B',
+            email: 'userb@example.com',
+          },
+        },
+      ],
+    };
+
+    describe('createGroupChat', () => {
+      it('should throw BadRequestException if group name is blank', async () => {
+        await expect(
+          service.createGroupChat({
+            name: '   ',
+            creatorId: 'user-aaa',
+            memberIds: ['user-bbb'],
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should throw BadRequestException if member count is less than 2 distinct members', async () => {
+        await expect(
+          service.createGroupChat({
+            name: 'Solo Group',
+            creatorId: 'user-aaa',
+            memberIds: ['user-aaa'], // Only 1 distinct user
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should throw NotFoundException if any requested user does not exist', async () => {
+        (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([
+          { id: 'user-aaa' },
+        ]); // user-bbb missing
+
+        await expect(
+          service.createGroupChat({
+            name: 'Dev Team',
+            creatorId: 'user-aaa',
+            memberIds: ['user-bbb'],
+          }),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should successfully create group chat in transaction and assign creator ADMIN role', async () => {
+        (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([
+          { id: 'user-aaa' },
+          { id: 'user-bbb' },
+        ]);
+
+        (prisma.$transaction as jest.Mock).mockImplementationOnce(
+          async (callback: (tx: unknown) => Promise<unknown>) => {
+            const txPrisma = {
+              chat: {
+                create: jest.fn().mockResolvedValue({
+                  id: 'group-chat-1',
+                  type: ChatType.GROUP,
+                  name: 'Dev Team',
+                  createdById: 'user-aaa',
+                  createdAt: new Date('2026-10-21T00:00:00Z'),
+                }),
+              },
+              chatMember: {
+                createMany: jest.fn().mockResolvedValue({ count: 2 }),
+              },
+            };
+            return callback(txPrisma);
+          },
+        );
+
+        const result = await service.createGroupChat({
+          name: 'Dev Team',
+          creatorId: 'user-aaa',
+          memberIds: ['user-bbb', 'user-aaa'], // duplicate creatorId should deduplicate cleanly
+        });
+
+        expect(result.chatId).toBe('group-chat-1');
+        expect(result.name).toBe('Dev Team');
+        expect(result.type).toBe(ChatType.GROUP);
+        expect(result.creatorId).toBe('user-aaa');
+        expect(result.members).toHaveLength(2);
+        expect(result.members[0].role).toBe(MemberRole.ADMIN);
+      });
+    });
+
+    describe('getGroupDetails', () => {
+      it('should throw NotFoundException if group does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.getGroupDetails('invalid-chat-id'),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if caller is not a member of the group', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.getGroupDetails('group-chat-1', 'user-outsider'),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should return group details when caller is an authorized member', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        const result = await service.getGroupDetails(
+          'group-chat-1',
+          'user-aaa',
+        );
+
+        expect(result.chatId).toBe('group-chat-1');
+        expect(result.name).toBe('Dev Team');
+        expect(result.members).toHaveLength(2);
+        expect(result.memberCount).toBe(2);
+        expect(result.members[0].name).toBe('User A');
+      });
+    });
+
+    describe('addGroupMember', () => {
+      it('should throw NotFoundException if group does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.addGroupMember('invalid-group', {
+            actingUserId: 'user-aaa',
+            userId: 'user-ccc',
+          }),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw ForbiddenException if acting user is not an ADMIN', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.addGroupMember('group-chat-1', {
+            actingUserId: 'user-bbb', // user-bbb is MEMBER, not ADMIN
+            userId: 'user-ccc',
+          }),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw ConflictException if target user is already a member', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.addGroupMember('group-chat-1', {
+            actingUserId: 'user-aaa',
+            userId: 'user-bbb', // already a member
+          }),
+        ).rejects.toThrow(ConflictException);
+      });
+
+      it('should throw NotFoundException if target user does not exist', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+        (prisma.user.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+        await expect(
+          service.addGroupMember('group-chat-1', {
+            actingUserId: 'user-aaa',
+            userId: 'non-existent-user',
+          }),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should successfully add new member to the group', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+        (prisma.user.findUnique as jest.Mock).mockResolvedValueOnce({
+          id: 'user-ccc',
+        });
+        (prisma.chatMember.create as jest.Mock).mockResolvedValueOnce({
+          id: 'mem-3',
+          chatId: 'group-chat-1',
+          userId: 'user-ccc',
+          role: MemberRole.MEMBER,
+          joinedAt: new Date('2026-10-21T01:00:00Z'),
+        });
+
+        const result = await service.addGroupMember('group-chat-1', {
+          actingUserId: 'user-aaa',
+          userId: 'user-ccc',
+        });
+
+        expect(result.chatId).toBe('group-chat-1');
+        expect(result.userId).toBe('user-ccc');
+        expect(result.role).toBe(MemberRole.MEMBER);
+      });
+    });
+
+    describe('removeGroupMember', () => {
+      it('should throw ForbiddenException if acting user is not an admin', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.removeGroupMember('group-chat-1', 'user-aaa', 'user-bbb'),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw NotFoundException if target user is not in the group', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.removeGroupMember(
+            'group-chat-1',
+            'user-outsider',
+            'user-aaa',
+          ),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('should throw BadRequestException when trying to remove the last admin', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.removeGroupMember('group-chat-1', 'user-aaa', 'user-aaa'),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should successfully remove member when acting user is admin', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+        (prisma.chatMember.delete as jest.Mock).mockResolvedValueOnce({});
+
+        const result = await service.removeGroupMember(
+          'group-chat-1',
+          'user-bbb',
+          'user-aaa',
+        );
+
+        expect(result.chatId).toBe('group-chat-1');
+        expect(result.userId).toBe('user-bbb');
+        expect(result.removed).toBe(true);
+      });
+    });
+
+    describe('leaveGroup', () => {
+      it('should throw ForbiddenException if user is not in group', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.leaveGroup('group-chat-1', { userId: 'user-outsider' }),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should throw BadRequestException if last admin leaves while other members remain', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+
+        await expect(
+          service.leaveGroup('group-chat-1', { userId: 'user-aaa' }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('should successfully allow non-admin member to leave group', async () => {
+        (prisma.chat.findUnique as jest.Mock).mockResolvedValueOnce(
+          mockGroupChat,
+        );
+        (prisma.chatMember.delete as jest.Mock).mockResolvedValueOnce({});
+
+        const result = await service.leaveGroup('group-chat-1', {
+          userId: 'user-bbb',
+        });
+
+        expect(result.chatId).toBe('group-chat-1');
+        expect(result.userId).toBe('user-bbb');
+        expect(result.left).toBe(true);
+      });
     });
   });
 });

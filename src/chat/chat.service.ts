@@ -1,16 +1,20 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { ChatType, MemberRole, Prisma } from '@prisma/client';
 import { FieldPath } from 'firebase-admin/firestore';
 import { PrismaService } from '../database/prisma.service';
 import { FirebaseService } from '../firebase/firebase.service';
+import { AddGroupMemberDto } from './dto/add-group-member.dto';
 import { CreateChatDto } from './dto/create-chat.dto';
+import { CreateGroupChatDto } from './dto/create-group-chat.dto';
 import { GetMessagesQueryDto } from './dto/get-messages-query.dto';
+import { LeaveGroupDto } from './dto/leave-group.dto';
 import { MarkReadDto } from './dto/mark-read.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { UpdateLastSeenDto } from './dto/update-last-seen.dto';
@@ -48,6 +52,59 @@ export interface LastSeenResult {
   userId: string;
   messageId: string;
   updatedAt: string;
+}
+
+export interface GroupMemberItem {
+  userId: string;
+  role: MemberRole;
+  joinedAt?: string;
+}
+
+export interface CreateGroupChatResult {
+  chatId: string;
+  name: string;
+  type: ChatType;
+  creatorId: string;
+  members: GroupMemberItem[];
+  createdAt: string;
+}
+
+export interface GroupDetailsMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: MemberRole;
+  joinedAt: string;
+}
+
+export interface GroupDetailsResult {
+  chatId: string;
+  name: string | null;
+  type: ChatType;
+  creatorId: string | null;
+  members: GroupDetailsMember[];
+  memberCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AddGroupMemberResult {
+  chatId: string;
+  userId: string;
+  role: MemberRole;
+  joinedAt: string;
+}
+
+export interface RemoveGroupMemberResult {
+  chatId: string;
+  userId: string;
+  removed: boolean;
+}
+
+export interface LeaveGroupResult {
+  chatId: string;
+  userId: string;
+  left: boolean;
 }
 
 @Injectable()
@@ -505,6 +562,351 @@ export class ChatService {
       userId,
       messageId,
       updatedAt: updatedAtDate.toISOString(),
+    };
+  }
+
+  /**
+   * Milestone 10: Create Group Chat
+   * POST /api/chat/group/create
+   */
+  async createGroupChat(
+    dto: CreateGroupChatDto,
+  ): Promise<CreateGroupChatResult> {
+    const trimmedName = dto.name?.trim();
+    if (!trimmedName) {
+      throw new BadRequestException('Group name cannot be blank');
+    }
+
+    const rawMemberIds = dto.memberIds || [];
+    // Deduplicate and ensure creator is part of the group
+    const memberSet = new Set([dto.creatorId, ...rawMemberIds]);
+    const distinctMemberIds = Array.from(memberSet);
+
+    // Enforce membership limits: minimum 2 distinct members, maximum 100
+    if (distinctMemberIds.length < 2) {
+      throw new BadRequestException(
+        'Group must contain at least 2 distinct members',
+      );
+    }
+    if (distinctMemberIds.length > 100) {
+      throw new BadRequestException(
+        'Group cannot exceed maximum of 100 members',
+      );
+    }
+
+    // Verify all users exist in PostgreSQL
+    const existingUsers = await this.prisma.user.findMany({
+      where: { id: { in: distinctMemberIds } },
+      select: { id: true },
+    });
+
+    if (existingUsers.length !== distinctMemberIds.length) {
+      const existingSet = new Set(existingUsers.map((u) => u.id));
+      const missingIds = distinctMemberIds.filter((id) => !existingSet.has(id));
+      throw new NotFoundException(
+        `The following users do not exist: ${missingIds.join(', ')}`,
+      );
+    }
+
+    // Relational transaction: Create chat entity and bulk insert members
+    const groupChat = await this.prisma.$transaction(async (tx) => {
+      const chat = await tx.chat.create({
+        data: {
+          type: ChatType.GROUP,
+          name: trimmedName,
+          createdById: dto.creatorId,
+        },
+      });
+
+      const memberRecords = distinctMemberIds.map((userId) => ({
+        chatId: chat.id,
+        userId,
+        role: userId === dto.creatorId ? MemberRole.ADMIN : MemberRole.MEMBER,
+      }));
+
+      await tx.chatMember.createMany({
+        data: memberRecords,
+      });
+
+      return { chat, memberRecords };
+    });
+
+    this.logger.log(
+      `Created group chat '${groupChat.chat.id}' ("${trimmedName}") with ${distinctMemberIds.length} members by creator '${dto.creatorId}'`,
+    );
+
+    return {
+      chatId: groupChat.chat.id,
+      name: groupChat.chat.name!,
+      type: groupChat.chat.type,
+      creatorId: dto.creatorId,
+      members: groupChat.memberRecords.map((m) => ({
+        userId: m.userId,
+        role: m.role,
+      })),
+      createdAt: groupChat.chat.createdAt.toISOString(),
+    };
+  }
+
+  /**
+   * Milestone 10: Get Group Details and Members
+   * GET /api/chat/group/:chatId
+   */
+  async getGroupDetails(
+    chatId: string,
+    callerUserId?: string,
+  ): Promise<GroupDetailsResult> {
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+      include: {
+        members: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: { joinedAt: 'asc' },
+        },
+      },
+    });
+
+    if (!chat || chat.type !== ChatType.GROUP) {
+      throw new NotFoundException(
+        `Group chat with ID '${chatId}' does not exist`,
+      );
+    }
+
+    if (callerUserId) {
+      const isMember = chat.members.some((m) => m.userId === callerUserId);
+      if (!isMember) {
+        throw new ForbiddenException(
+          `User '${callerUserId}' is not authorized to view group '${chatId}'`,
+        );
+      }
+    }
+
+    return {
+      chatId: chat.id,
+      name: chat.name,
+      type: chat.type,
+      creatorId: chat.createdById,
+      members: chat.members.map((m) => ({
+        userId: m.userId,
+        name: m.user.name,
+        email: m.user.email,
+        role: m.role,
+        joinedAt: m.joinedAt.toISOString(),
+      })),
+      memberCount: chat.members.length,
+      createdAt: chat.createdAt.toISOString(),
+      updatedAt: chat.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Milestone 10: Add Member to Group
+   * POST /api/chat/group/:chatId/members
+   */
+  async addGroupMember(
+    chatId: string,
+    dto: AddGroupMemberDto,
+  ): Promise<AddGroupMemberResult> {
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+      include: { members: true },
+    });
+
+    if (!chat || chat.type !== ChatType.GROUP) {
+      throw new NotFoundException(
+        `Group chat with ID '${chatId}' does not exist`,
+      );
+    }
+
+    // Verify acting user is a member and has ADMIN role
+    const actingMember = chat.members.find(
+      (m) => m.userId === dto.actingUserId,
+    );
+    if (!actingMember) {
+      throw new ForbiddenException(
+        `User '${dto.actingUserId}' is not a member of group '${chatId}'`,
+      );
+    }
+    if (actingMember.role !== MemberRole.ADMIN) {
+      throw new ForbiddenException(
+        `Only group administrators can add members to group '${chatId}'`,
+      );
+    }
+
+    // Verify target user is not already a member
+    const isAlreadyMember = chat.members.some((m) => m.userId === dto.userId);
+    if (isAlreadyMember) {
+      throw new ConflictException(
+        `User '${dto.userId}' is already a member of group '${chatId}'`,
+      );
+    }
+
+    // Verify group capacity
+    if (chat.members.length >= 100) {
+      throw new BadRequestException(
+        'Group has reached maximum capacity of 100 members',
+      );
+    }
+
+    // Verify target user exists in database
+    const targetUser = await this.prisma.user.findUnique({
+      where: { id: dto.userId },
+    });
+    if (!targetUser) {
+      throw new NotFoundException(
+        `User with ID '${dto.userId}' does not exist`,
+      );
+    }
+
+    const newMember = await this.prisma.chatMember.create({
+      data: {
+        chatId,
+        userId: dto.userId,
+        role: dto.role || MemberRole.MEMBER,
+      },
+    });
+
+    this.logger.log(
+      `User '${dto.userId}' added to group '${chatId}' by admin '${dto.actingUserId}' with role '${newMember.role}'`,
+    );
+
+    return {
+      chatId,
+      userId: newMember.userId,
+      role: newMember.role,
+      joinedAt: newMember.joinedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Milestone 10: Remove Member from Group
+   * DELETE /api/chat/group/:chatId/members/:userId
+   */
+  async removeGroupMember(
+    chatId: string,
+    targetUserId: string,
+    actingUserId: string,
+  ): Promise<RemoveGroupMemberResult> {
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+      include: { members: true },
+    });
+
+    if (!chat || chat.type !== ChatType.GROUP) {
+      throw new NotFoundException(
+        `Group chat with ID '${chatId}' does not exist`,
+      );
+    }
+
+    // Verify acting user is a member and has ADMIN role
+    const actingMember = chat.members.find((m) => m.userId === actingUserId);
+    if (!actingMember) {
+      throw new ForbiddenException(
+        `User '${actingUserId}' is not a member of group '${chatId}'`,
+      );
+    }
+    if (actingMember.role !== MemberRole.ADMIN) {
+      throw new ForbiddenException(
+        `Only group administrators can remove members from group '${chatId}'`,
+      );
+    }
+
+    // Verify target user is in the group
+    const targetMember = chat.members.find((m) => m.userId === targetUserId);
+    if (!targetMember) {
+      throw new NotFoundException(
+        `User '${targetUserId}' is not a member of group '${chatId}'`,
+      );
+    }
+
+    // Guard: Prevent removing the last administrator
+    if (targetMember.role === MemberRole.ADMIN) {
+      const totalAdmins = chat.members.filter(
+        (m) => m.role === MemberRole.ADMIN,
+      ).length;
+      if (totalAdmins <= 1) {
+        throw new BadRequestException(
+          'Cannot remove the last administrator of the group. Assign another administrator first.',
+        );
+      }
+    }
+
+    await this.prisma.chatMember.delete({
+      where: {
+        chatId_userId: { chatId, userId: targetUserId },
+      },
+    });
+
+    this.logger.log(
+      `User '${targetUserId}' removed from group '${chatId}' by admin '${actingUserId}'`,
+    );
+
+    return {
+      chatId,
+      userId: targetUserId,
+      removed: true,
+    };
+  }
+
+  /**
+   * Milestone 10: Leave Group
+   * POST /api/chat/group/:chatId/leave
+   */
+  async leaveGroup(
+    chatId: string,
+    dto: LeaveGroupDto,
+  ): Promise<LeaveGroupResult> {
+    const chat = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+      include: { members: true },
+    });
+
+    if (!chat || chat.type !== ChatType.GROUP) {
+      throw new NotFoundException(
+        `Group chat with ID '${chatId}' does not exist`,
+      );
+    }
+
+    const leavingMember = chat.members.find((m) => m.userId === dto.userId);
+    if (!leavingMember) {
+      throw new ForbiddenException(
+        `User '${dto.userId}' is not a member of group '${chatId}'`,
+      );
+    }
+
+    // Guard: Prevent leaving as the last administrator if other members exist
+    if (leavingMember.role === MemberRole.ADMIN) {
+      const totalAdmins = chat.members.filter(
+        (m) => m.role === MemberRole.ADMIN,
+      ).length;
+      const remainingMembersCount = chat.members.length - 1;
+      if (totalAdmins <= 1 && remainingMembersCount > 0) {
+        throw new BadRequestException(
+          'Cannot leave group as the last administrator while other members exist. Promote another member to admin before leaving.',
+        );
+      }
+    }
+
+    await this.prisma.chatMember.delete({
+      where: {
+        chatId_userId: { chatId, userId: dto.userId },
+      },
+    });
+
+    this.logger.log(`User '${dto.userId}' left group '${chatId}'`);
+
+    return {
+      chatId,
+      userId: dto.userId,
+      left: true,
     };
   }
 }

@@ -15,7 +15,10 @@
   - [2. Relational Chat Membership as Source of Truth](#2-relational-chat-membership-as-source-of-truth)
   - [3. Backwards-Movement Prevention in Last-Seen Tracking](#3-backwards-movement-prevention-in-last-seen-tracking)
   - [4. Idempotent Read Receipts](#4-idempotent-read-receipts)
+  - [5. Group Chat Relational Integrity & Role Governance](#5-group-chat-relational-integrity--role-governance-milestone-10)
 - [API Documentation](#api-documentation)
+  - [1:1 Direct Chat APIs](#11-direct-chat-apis)
+  - [Group Chat Management APIs (Milestone 10)](#group-chat-management-apis-milestone-10)
 - [Interactive Swagger / OpenAPI](#interactive-swagger--openapi)
 - [Prerequisites & Environment Setup](#prerequisites--environment-setup)
 - [Getting Started](#getting-started)
@@ -62,8 +65,8 @@ ChatHub is a production-grade 1:1 chat backend service designed for high through
 | Data Domain | Storage Engine | Responsibility & Reason |
 | :--- | :--- | :--- |
 | **Users** | PostgreSQL | Identity records, email uniqueness, relational foreign keys. |
-| **Chats** | PostgreSQL | 1:1 Chat entities, canonical unique constraints (`@@unique([user1Id, user2Id])`). |
-| **Chat Membership** | PostgreSQL | **Source of truth** for authorization. Cascade deletes, indexed membership queries. |
+| **Chats** | PostgreSQL | 1:1 & Group Chat entities (`ChatType: DIRECT | GROUP`), canonical unique constraints for 1:1 (`@@unique([user1Id, user2Id])`). |
+| **Chat Membership** | PostgreSQL | **Source of truth** for authorization. Roles (`ADMIN` vs `MEMBER`), cascade deletes, indexed membership queries. |
 | **Messages** | Firebase Firestore | NoSQL document storage scoped under `chats/{chatId}/messages`. Scalable writes. |
 | **Read Receipts** | Firebase Firestore | Idempotent per-user receipts at `.../messages/{msgId}/readReceipts/{userId}`. |
 | **Last-Seen Tracking** | Firebase Firestore | Monotonic high-water mark pointer at `chats/{chatId}/lastSeen/{userId}`. |
@@ -134,6 +137,12 @@ chats/{chatId}/
 
 ### 4. Idempotent Read Receipts
 - When `POST /chat/:chatId/message/:messageId/read` is invoked repeatedly, the existing read receipt is returned without creating duplicate records and without overwriting the initial `readAt` timestamp.
+
+### 5. Group Chat Relational Integrity & Role Governance (Milestone 10)
+- **Atomic Creation**: Group entity and initial members are written inside a single PostgreSQL `$transaction`.
+- **Role-Based Governance**: Only members with `role: ADMIN` can add or remove other participants (`403 Forbidden` for regular members).
+- **Last Administrator Guard**: Prevents removing or abandoning a group by the last administrator while other members remain (`400 Bad Request`), preventing orphaned groups.
+- **PostgreSQL as Source of Truth**: All group metadata and memberships reside in PostgreSQL, ensuring ACID consistency, indexed membership queries, and complete compatibility with existing Firestore message streams.
 
 ---
 
@@ -243,6 +252,8 @@ chats/{chatId}/
     "chats": [
       {
         "chatId": "6b6eb37e-5b65-44eb-9ec9-585b6e80f01c",
+        "type": "DIRECT",
+        "name": null,
         "memberIds": [
           "78a15aac-0d92-4ca9-ab67-70a78b569581",
           "05044ae6-ed94-405c-9416-36340b4842a6"
@@ -252,6 +263,150 @@ chats/{chatId}/
       }
     ],
     "totalCount": 1
+  }
+  ```
+
+---
+
+### Group Chat Management APIs (Milestone 10)
+
+#### 7. Create Group Chat
+- **Route**: `POST /api/chat/group/create`
+- **Request Body**:
+  ```json
+  {
+    "name": "Backend Engineering Team",
+    "creatorId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "memberIds": [
+      "05044ae6-ed94-405c-9416-36340b4842a6",
+      "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    ]
+  }
+  ```
+- **Rules**:
+  - Validates group name (1–100 chars, non-blank).
+  - Enforces min 2 distinct members and max 100 members.
+  - Automatically deduplicates member IDs and assigns the creator the `ADMIN` role.
+  - Validates that all requested users exist in PostgreSQL.
+  - Creates the group entity and members inside an atomic PostgreSQL transaction.
+- **Response (`201 Created`)**:
+  ```json
+  {
+    "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "name": "Backend Engineering Team",
+    "type": "GROUP",
+    "creatorId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "members": [
+      {
+        "userId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+        "role": "ADMIN"
+      },
+      {
+        "userId": "05044ae6-ed94-405c-9416-36340b4842a6",
+        "role": "MEMBER"
+      },
+      {
+        "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "role": "MEMBER"
+      }
+    ],
+    "createdAt": "2026-10-21T00:00:00.000Z"
+  }
+  ```
+
+#### 8. Get Group Details & Members
+- **Route**: `GET /api/chat/group/:chatId?userId=<callerUserId>`
+- **Header (Alternative)**: `x-user-id: <callerUserId>`
+- **Rules**:
+  - Verifies that the group exists and is of type `GROUP`.
+  - Authorizes caller: User must be an existing group member to view group details (`403 Forbidden` if unauthorized).
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "name": "Backend Engineering Team",
+    "type": "GROUP",
+    "creatorId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "members": [
+      {
+        "userId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+        "name": "Alice",
+        "email": "alice@example.com",
+        "role": "ADMIN",
+        "joinedAt": "2026-10-21T00:00:00.000Z"
+      },
+      {
+        "userId": "05044ae6-ed94-405c-9416-36340b4842a6",
+        "name": "Bob",
+        "email": "bob@example.com",
+        "role": "MEMBER",
+        "joinedAt": "2026-10-21T00:00:00.000Z"
+      }
+    ],
+    "memberCount": 2,
+    "createdAt": "2026-10-21T00:00:00.000Z",
+    "updatedAt": "2026-10-21T00:00:00.000Z"
+  }
+  ```
+
+#### 9. Add Member to Group
+- **Route**: `POST /api/chat/group/:chatId/members`
+- **Request Body**:
+  ```json
+  {
+    "actingUserId": "78a15aac-0d92-4ca9-ab67-70a78b569581",
+    "userId": "e4b2d398-3561-4bb2-b60f-f4c6e9491745",
+    "role": "MEMBER"
+  }
+  ```
+- **Rules**:
+  - `actingUserId` must be an `ADMIN` in the group (`403 Forbidden` if regular member or non-member).
+  - Target user must exist in PostgreSQL (`404 Not Found`).
+  - Rejects duplicate addition if user is already a member (`409 Conflict`).
+  - Enforces group maximum capacity of 100 members (`400 Bad Request`).
+- **Response (`201 Created`)**:
+  ```json
+  {
+    "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "userId": "e4b2d398-3561-4bb2-b60f-f4c6e9491745",
+    "role": "MEMBER",
+    "joinedAt": "2026-10-21T00:05:00.000Z"
+  }
+  ```
+
+#### 10. Remove Member from Group
+- **Route**: `DELETE /api/chat/group/:chatId/members/:userId?actingUserId=<adminUserId>`
+- **Header (Alternative)**: `x-user-id: <adminUserId>`
+- **Rules**:
+  - `actingUserId` must be an `ADMIN` in the group (`403 Forbidden` if not admin).
+  - Target user must be a member of the group (`404 Not Found` if not in group).
+  - **Last Administrator Guard**: Prevents removing the last administrator of the group (`400 Bad Request`). Another admin must be designated first.
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "userId": "e4b2d398-3561-4bb2-b60f-f4c6e9491745",
+    "removed": true
+  }
+  ```
+
+#### 11. Leave Group
+- **Route**: `POST /api/chat/group/:chatId/leave`
+- **Request Body**:
+  ```json
+  {
+    "userId": "05044ae6-ed94-405c-9416-36340b4842a6"
+  }
+  ```
+- **Rules**:
+  - User must be an existing group member (`403 Forbidden`).
+  - **Last Administrator Guard**: If the leaving user is the last `ADMIN` and other members remain, departure is blocked (`400 Bad Request`). An admin role must be transferred to another member before leaving.
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "chatId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "userId": "05044ae6-ed94-405c-9416-36340b4842a6",
+    "left": true
   }
   ```
 
